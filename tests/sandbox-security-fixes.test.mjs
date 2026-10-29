@@ -127,3 +127,9 @@ test('T3: with a local proxy the profile reaches only its port and not the keych
   assert.ok(!/remote ip "localhost:\*"/.test(proxied));
   assert.ok(!managedSeatbelt({ ...base, loopback: false }).includes('com.apple.SecurityServer'));
 });
+
+test('T5: every secret shape of the shared corpus is redacted from tool output', async () => {
+  const { redactedText } = await import('../src/redact.mjs');
+  const { NEEDLES, SECRETS } = await import('./fixtures/secret-corpus.mjs');
+  for (const [i, secret] of SECRETS.entries()) assert.ok(!redactedText(`out ${secret} end`).includes(NEEDLES[i]), `leaked: ${NEEDLES[i]}`);
+});
