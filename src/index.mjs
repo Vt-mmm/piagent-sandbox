@@ -19,6 +19,8 @@ import { redactedText } from './redact.mjs';
 //   piagent:tools.attest    sandbox → harness  { v, tools: [{ name, source }] }
 //   piagent:permission.mode sandbox → harness  { v, mode: 'ask' | 'full' | 'bypass' }
 //   piagent:run.state       provider → harness (also read here)  { v, harness: { bypassMode } } allows Bypass
+//   piagent:tools.child     harness → sandbox  { v, readOnly: true, commands, web, key, reply } → reply({ ok, tools }) read-only tools for a helper
+//   piagent:tools.child.close  harness → sandbox  { v, key }
 export const SOURCE = 'piagent-sandbox';
 const CONTRACT = 1;
 const MUTATING = new Set(['edit', 'write', 'bash']);
@@ -46,6 +48,20 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
   for (const tool of tools) pi.registerTool(tool);
   const attest = () => pi.events.emit('piagent:tools.attest', { v: CONTRACT, tools: tools.map(tool => ({ name: tool.name, source: SOURCE })) });
 
+  // Helpers get read, grep, find, ls (and bash without network when `commands`) on a read-only boundary of their own; never edit or write.
+  const children = new Map();
+  const closeChild = async key => { const child = children.get(key); children.delete(key); await child?.dispose(); };
+  pi.events.on('piagent:tools.child', async request => {
+    const reply = typeof request?.reply === 'function' ? request.reply : () => {};
+    try {
+      if (request.readOnly !== true || typeof request.key !== 'string') throw new Error('managed-tools-child-invalid');
+      await closeChild(request.key);
+      const child = new ManagedToolBoundary({ cwd, sdkRoot: root, userHome, readOnly: true, commands: request.commands === true, ...boundaryOptions });
+      children.set(request.key, child);
+      reply({ v: CONTRACT, ok: true, tools: child.tools(api) });
+    } catch (error) { reply({ v: CONTRACT, ok: false, error: String(error?.message ?? error) }); }
+  });
+  pi.events.on('piagent:tools.child.close', request => { if (typeof request?.key === 'string') closeChild(request.key); });
   pi.events.on('piagent:run.state', state => permission.allowBypass(state?.harness?.bypassMode === true));
   pi.on('session_start', (_event, ctx) => { permission.restore(ctx.sessionManager.getEntries()); attest(); });
   pi.on('before_agent_start', event => { if (event.messageType === 'user') turn += 1; running = true; attest(); });
@@ -116,6 +132,7 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
     approvals.forget();
     ts.dispose();
     await checkpoints.dispose();
+    await Promise.all([...children.keys()].map(closeChild));
     await boundary.dispose();
   });
   return { boundary, permission, approvals, checkpoints, tools, owner };
