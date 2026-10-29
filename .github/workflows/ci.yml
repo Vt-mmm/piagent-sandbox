@@ -18,5 +18,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install bubblewrap and allow user namespaces (Linux sandbox)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-net true
       - run: npm ci
       - run: npm test

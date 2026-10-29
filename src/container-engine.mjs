@@ -1,0 +1,108 @@
+import fs from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
+
+// The Docker engine a company command may use once the member approves it
+// (run_with_docker): its socket, the CLI and its plugins (compose, buildx).
+// The socket is the only thing opened beyond an approved network command:
+// containers run in the engine (Docker Desktop's VM, Colima, OrbStack, the
+// Linux daemon, Podman's compatible socket), not in this sandbox.
+// The CLI gets a configuration folder of its own in the sandbox's home: no
+// registry credentials (credsStore, auths), so public images are pulled and
+// private registries are not, as with .npmrc.
+const isSocket = file => { try { return fs.statSync(file).isSocket(); } catch { return false; } };
+const real = file => { try { return fs.realpathSync(file); } catch { return null; } };
+
+function socketCandidates(userHome, env, system) {
+  const host = /^unix:\/\/(\/.+)$/.exec(env.DOCKER_HOST ?? '')?.[1];
+  const runtime = env.XDG_RUNTIME_DIR;
+  return [host, path.join(userHome, '.docker/run/docker.sock'), ...(system ? ['/var/run/docker.sock'] : []), path.join(userHome, '.colima/default/docker.sock'),
+    path.join(userHome, '.orbstack/run/docker.sock'), ...(runtime ? [path.join(runtime, 'docker.sock'), path.join(runtime, 'podman/podman.sock')] : [])].filter(Boolean);
+}
+
+// The member's CLI plugins (links into the app bundle on macOS).
+function cliPlugins(userHome, system) {
+  const dirs = [path.join(userHome, '.docker/cli-plugins'), ...!system ? [] : ['/usr/local/lib/docker/cli-plugins', '/usr/libexec/docker/cli-plugins', '/usr/lib/docker/cli-plugins',
+    '/Applications/Docker.app/Contents/Resources/cli-plugins', '/opt/homebrew/lib/docker/cli-plugins']];
+  const plugins = new Map();
+  for (const dir of dirs) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const name of names) {
+      if (!/^docker-[a-z0-9-]+$/.test(name) || plugins.has(name)) continue;
+      const file = real(path.join(dir, name));
+      try { if (file && fs.statSync(file).isFile()) plugins.set(name, file); } catch { /* broken link */ }
+    }
+  }
+  return plugins;
+}
+
+// `system`: also the machine-wide socket and plugin folders (tests leave them out).
+export function containerEngine({ userHome, env = process.env, paths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/Applications/Docker.app/Contents/Resources/bin'], system = true } = {}) {
+  const socket = socketCandidates(userHome, env, system).map(real).find(file => file && isSocket(file));
+  const cli = paths.map(dir => real(path.join(dir, 'docker'))).find(Boolean);
+  if (!socket || !cli) return null;
+  const plugins = cliPlugins(userHome, system);
+  // Read roots: the folders the CLI and plugins live in (/usr is open already).
+  const readRoots = [...new Set([cli, ...plugins.values()].map(file => {
+    const bundle = /^(\/Applications\/[^/]+\.app)\//.exec(file)?.[1];
+    return bundle ?? path.dirname(file);
+  }))].filter(dir => !/^\/(usr|bin|sbin|opt\/homebrew)(\/|$)/.test(dir));
+  return { socket, cli, plugins, readRoots };
+}
+
+// The CLI's configuration in the sandbox's home, and the environment that
+// points it (and Testcontainers) at the engine.
+export function engineEnvironment(engine, home) {
+  const config = path.join(home, '.docker');
+  fs.mkdirSync(path.join(config, 'cli-plugins'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(config, 'config.json'), '{}\n', { mode: 0o600 });
+  for (const [name, file] of engine.plugins) {
+    try { fs.symlinkSync(file, path.join(config, 'cli-plugins', name)); } catch { /* already there */ }
+  }
+  return {
+    DOCKER_HOST: `unix://${engine.socket}`, DOCKER_CONFIG: config, DOCKER_CLI_HINTS: 'false',
+    // Testcontainers' reaper mounts the engine's socket inside its VM, where
+    // Docker Desktop and Colima name it /var/run/docker.sock.
+    ...(process.platform === 'darwin' ? { TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: '/var/run/docker.sock' } : {}),
+  };
+}
+
+// The Docker CLI on this machine, engine running or not.
+export const dockerCli = (paths = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/Applications/Docker.app/Contents/Resources/bin']) =>
+  paths.map(dir => real(path.join(dir, 'docker'))).find(Boolean) ?? null;
+
+// Whether the engine behind a socket answers (Docker Desktop leaves its
+// socket file in place when it quits).
+export function engineAlive(socket, timeoutMs = 2000) {
+  return new Promise(resolve => {
+    let reply = '';
+    const done = value => { clearTimeout(timer); connection.destroy(); resolve(value); };
+    const connection = net.createConnection(socket, () => connection.write('GET /_ping HTTP/1.0\r\nHost: docker\r\n\r\n'));
+    const timer = setTimeout(() => done(false), timeoutMs);
+    connection.on('data', chunk => { reply += chunk; if (/\r\n\r\nOK/.test(reply)) done(true); });
+    connection.on('error', () => done(false)); connection.on('end', () => done(/\r\n\r\nOK/.test(reply)));
+  });
+}
+
+// How start_docker starts an engine the member installed: the app (Docker
+// Desktop, OrbStack, Rancher Desktop) or Colima on macOS, the user service on
+// Linux. Null when none is installed, or only the system service is (that
+// needs the member's password).
+export function engineLauncher({ userHome, platform = process.platform, exists = fs.existsSync } = {}) {
+  if (platform === 'darwin') {
+    for (const app of ['Docker', 'OrbStack', 'Rancher Desktop']) {
+      const bundle = [`/Applications/${app}.app`, path.join(userHome, `Applications/${app}.app`)].find(exists);
+      if (bundle) return { label: app === 'Docker' ? 'Docker Desktop' : app, command: '/usr/bin/open', args: ['-g', '-a', bundle] };
+    }
+    const colima = ['/opt/homebrew/bin/colima', '/usr/local/bin/colima'].find(exists);
+    return colima ? { label: 'Colima', command: colima, args: ['start'] } : null;
+  }
+  // WSL2: Docker Desktop is a Windows app that serves this distribution.
+  const desktop = '/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe';
+  if (exists('/proc/sys/fs/binfmt_misc/WSLInterop') && exists(desktop))
+    return { label: 'Docker Desktop', command: '/mnt/c/Windows/System32/cmd.exe', args: ['/c', 'start', '""', 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe'] };
+  const units = [path.join(userHome, '.config/systemd/user/docker.service'), '/usr/lib/systemd/user/docker.service', '/usr/lib/systemd/user/podman.socket'];
+  const unit = units.find(exists);
+  return unit ? { label: unit.endsWith('podman.socket') ? 'Podman' : 'Docker (rootless)', command: '/usr/bin/systemctl', args: ['--user', 'start', path.basename(unit)] } : null;
+}
