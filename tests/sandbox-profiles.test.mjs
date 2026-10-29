@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { BWRAP, bubblewrapArgs, credentialFiles, credentialName, referenceFolders } from '../src/linux-sandbox.mjs';
+import { BWRAP, bubblewrapArgs, credentialFiles, credentialName, memberReferences } from '../src/linux-sandbox.mjs';
 import { SEATBELT_TERMINAL_RULES, managedSeatbelt } from '../src/seatbelt.mjs';
 import { seatbeltTerminal } from '../src/terminal-seatbelt.mjs';
 
@@ -22,7 +22,8 @@ test('Seatbelt: default deny, writes only in the project and the temporary folde
   assert.match(profile, /auth\\\.json/);
   assert.match(profile, /\.env\[-\._\]\(example\|sample\|template\|dist\|defaults\)\$\|cacert/, 'committed templates stay readable');
   assert.ok(!/network-outbound \(remote ip\)/.test(profile), 'no internet without approval');
-  assert.match(profile, /network-outbound \(remote ip "localhost:\*"\)/);
+  assert.ok(!/network-outbound \(remote ip "localhost:\*"\)/.test(profile), 'T3: no loopback without a proxy port or approval');
+  assert.match(managedSeatbelt({ ...base, loopback: true }), /network-outbound \(remote ip "localhost:\*"\)/);
 });
 
 test('Seatbelt: a read-only helper cannot write the project; network is added only for an approved command; a local proxy closes loopback', () => {
@@ -36,11 +37,12 @@ test('Seatbelt: a read-only helper cannot write the project; network is added on
   assert.throws(() => managedSeatbelt({ ...base, cwd: '/p/"quote' + String.fromCharCode(1) }), /managed-path-invalid/);
 });
 
-test('Seatbelt: reference folders are read-only and hidden entries of the home folder stay closed', () => {
-  const profile = managedSeatbelt({ ...base, references: '/Users/member' });
-  assert.match(profile, /\(allow file-read\* \(subpath "\/Users\/member"\)/);
-  assert.match(profile, /\(deny file-read-data file-read-xattr/);
-  assert.match(profile, /\^\/Users\/member\/\\\./);
+test('Seatbelt: only the reference folders the member chose are readable; the home folder as a whole is closed', () => {
+  const profile = managedSeatbelt({ ...base, references: ['/Users/member/work/api'] });
+  assert.match(profile, /\(allow file-read\* \(subpath "\/Users\/member\/work\/api"\)\)/);
+  assert.ok(!profile.includes('(subpath "/Users/member")'));
+  assert.ok(!profile.includes('/Volumes') && !profile.includes('/Users/Shared'));
+  assert.ok(!managedSeatbelt(base).includes('/Users/member'));
 });
 
 test('Linux names: the same credential files as macOS, and templates are not credentials', () => {
@@ -59,7 +61,9 @@ test('Linux: credential files are found in the project, never in dependency fold
     for (const file of ['.env', 'api/.npmrc', 'node_modules/x/.env', '.env.example', 'api/readme.md']) fs.writeFileSync(path.join(dir, file), 'x');
     const found = credentialFiles([dir]).map(item => path.relative(dir, item.path)).sort();
     assert.deepEqual(found, ['.env', 'api/.npmrc']);
-    assert.deepEqual(referenceFolders(dir).map(item => path.basename(item)).sort(), ['api', 'node_modules']);
+    const list = path.join(dir, 'refs'); fs.writeFileSync(list, `# mine\n${path.join(dir, 'api')}\nrelative/path\n${path.join(dir, 'missing')}\n/\n`);
+    assert.deepEqual(memberReferences(list), [path.join(dir, 'api')]);
+    assert.deepEqual(memberReferences(null), []);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 

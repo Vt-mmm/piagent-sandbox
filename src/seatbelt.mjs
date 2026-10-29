@@ -20,19 +20,15 @@ export function literal(value) {
 export const inside = (file, root) => file === root || file.startsWith(root + path.sep);
 const escapeRegex = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// Folders a member points the agent to for reference (an @ mention): their own files, external drives and the
-// shared folder, read-only. Hidden entries of the home folder and ~/Library stay closed, except read roots there.
-// Seatbelt lets a rule naming file-read-data win over one naming file-read*, so the roots are left out of the
-// deny rule rather than allowed again after it.
-function referenceRules(home, roots) {
-  if (!home || /["\\]/.test(home)) return '';
-  const opened = roots.filter(root => inside(root, home)).map(root => ` (require-not (subpath ${literal(root)}))`).join('');
-  return `(allow file-read* (subpath ${literal(home)}) (subpath "/Volumes") (subpath "/Users/Shared") (subpath "/private/tmp"))
-(deny file-read-data file-read-xattr (require-all (require-any (regex #"^${escapeRegex(home)}/\\.") (subpath ${literal(path.join(home, 'Library'))}))${opened}))`;
+// Folders the member chose for reference (the `sandbox-references` file in the agent dir, one absolute path per line): read-only. The home
+// folder as a whole is closed: only these folders, not "everything but dotfiles". Credential names stay closed inside them.
+function referenceRules(roots) {
+  const list = (Array.isArray(roots) ? roots : []).filter(root => typeof root === 'string');
+  return list.length ? `(allow file-read* ${list.map(root => `(subpath ${literal(root)})`).join(' ')})` : '';
 }
 
 export function managedSeatbelt({ cwd, sdkRoot, runtimeRoot, temporary, node, denied = [], readOnly = false, repository = [], gitDirs = [], toolchains = [],
-  developer = [], browsers = [], network = false, references = null, skills = [], caches = [], loopback = true, license = null, docker = null, proxyPort = null }) {
+  developer = [], browsers = [], network = false, references = [], skills = [], caches = [], loopback = false, license = null, docker = null, proxyPort = null }) {
   const readRoots = ['/System', '/usr', '/bin', '/sbin', '/Library/Developer', '/Applications/Xcode.app', '/opt/homebrew', ...SYSTEM, ...developer,
     sdkRoot, runtimeRoot, cwd, temporary, ...repository, ...gitDirs, ...toolchains, ...skills, ...caches, ...browsers].filter(Boolean);
   const subpaths = list => list.map(root => `(subpath ${literal(root)})`).join(' ');
@@ -43,9 +39,9 @@ export function managedSeatbelt({ cwd, sdkRoot, runtimeRoot, temporary, node, de
   // com.apple.SecurityServer (the keychain service) is reachable only for a command that was approved to use the network.
   const trust = `(allow mach-lookup (global-name "com.apple.trustd.agent") (global-name "com.apple.ocspd")${network ? ' (global-name "com.apple.SecurityServer")' : ''})
 (allow file-read* (subpath "/private/var/db/mds") (literal "/Library/Keychains/System.keychain") (subpath "/Library/Security/Trust Settings"))`;
-  // Every command may start servers and reach them (a test's own server, Playwright's Chromium). The rule names loopback;
-  // a server it starts is reachable while it runs. Without approval nothing else is reached: no internet, no name lookups.
-  // While a local proxy listens, not even loopback (Seatbelt cannot close one port of an open loopback).
+  // A plain command may start servers (bind) but reaches nothing: no internet, no name lookups, no service of this machine on loopback
+  // (a database, a dev server, another tool's proxy), only the package proxy's port. A command that must talk to a server of its own
+  // (end-to-end tests) runs with run_with_network, which is asked about.
   let networkRules;
   if (network) {
     networkRules = `(allow network-outbound (remote ip))
@@ -67,7 +63,7 @@ ${trust}${docker ? `\n(allow network-outbound (literal ${literal(docker)}))` : '
 (allow mach-lookup (global-name "com.apple.system.logger") (global-name "com.apple.system.opendirectoryd"))
 (allow file-read-metadata)
 (allow file-read* (literal "/") ${subpaths(readRoots)} (literal ${literal(node)}) (subpath "/private/etc") (subpath "/dev")${license ? ` (literal ${literal(license)})` : ''})
-${referenceRules(references, readRoots)}
+${referenceRules(references)}
 (allow file-write* ${subpaths(writeRoots)} (literal "/dev/null") (literal "/dev/tty"))
 (allow network-bind network-inbound (local ip "localhost:*"))
 (allow iokit-open (iokit-user-client-class "RootDomainUserClient"))

@@ -63,11 +63,14 @@ test('inside the project: read, write, edit, search and run a test still work', 
   assert.match((await attempt(tools.call('ls', {}))).out, /hello\.txt/);
 });
 
-test('a server the command starts on 127.0.0.1 is reachable from the same command', async () => {
+test('T3: a plain command on macOS cannot connect to a loopback service, not even its own; an approved network command can', async () => {
   const script = "const h=require('http'),s=h.createServer((q,r)=>r.end('pong')).listen(0,'127.0.0.1',()=>{"
-    + "h.get({host:'127.0.0.1',port:s.address().port},r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{console.log('GOT '+d);s.close()})})})";
-  const result = await bash(`node -e "${script}"`);
-  assert.match(result.out, /GOT pong/);
+    + "h.get({host:'127.0.0.1',port:s.address().port},r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{console.log('GOT '+d);s.close()})}).on('error',e=>{console.log('ERR '+e.code);s.close()})})";
+  const plain = await bash(`node -e "${script}"`);
+  if (darwin) assert.doesNotMatch(plain.out, /GOT pong/);
+  else assert.match(plain.out, /GOT pong/, 'Linux: its own network namespace');
+  const approved = await attempt(tools.boundary.invoke('bash', { command: `node -e "${script}"` }, undefined, undefined, undefined, { network: true }));
+  assert.match(approved.out, /GOT pong/);
 });
 
 test('the temporary folder is private and writable; /tmp stays read-only with a way forward in the error', async () => {

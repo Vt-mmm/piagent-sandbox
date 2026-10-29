@@ -11,7 +11,7 @@ import { languageEnvironment } from './language-environment.mjs';
 import { containerEngine, dockerCli, engineEnvironment } from './container-engine.mjs';
 import { proxyEnvironment } from './package-proxy.mjs';
 import { startBoundaryPackageProxy } from './boundary-package-proxy.mjs';
-import { BWRAP, bubblewrapArgs, credentialFiles, referenceFolders } from './linux-sandbox.mjs';
+import { BWRAP, bubblewrapArgs, credentialFiles, memberReferences } from './linux-sandbox.mjs';
 import { inside, managedSeatbelt } from './seatbelt.mjs';
 import { runSafeGit } from './safe-git.mjs';
 
@@ -99,7 +99,7 @@ export class ManagedToolBoundary {
   // readOnly: the project cannot be written; `commands`: bash is still offered (a helper that runs checks).
   // `userHome` is the member's home (tests pass a fake one). `proxy`: options for the package proxy (tests).
   constructor({ cwd, sdkRoot, protectedRoots = [], readOnly = false, commands = false, node = process.execPath, identity, userHome: home, searchTools = true,
-    skills: skillFolders = [], proxyPorts, domainsFile = null, proxy = {} } = {}) {
+    skills: skillFolders = [], proxyPorts, domainsFile = null, referencesFile = null, references: referenceList, proxy = {} } = {}) {
     this.linux = process.platform === 'linux';
     if (process.platform !== 'darwin' && !(this.linux && BWRAP)) throw new Error('managed-sandbox-unavailable');
     this.cwd = fs.realpathSync(cwd);
@@ -140,14 +140,14 @@ export class ManagedToolBoundary {
       .filter(dir => dir !== '/' && !/[\x00-\x1f\x7f]/.test(dir) && !narrowed.some(root => inside(root, dir)) && !inside(userHome, dir));
     // Only approved commands get network; credentials stay denied, and so do reference folders.
     this.networkAllowed = !readOnly;
+    // Reference folders: chosen by the member, never the home folder as a whole, never a credential folder.
+    this.referenceRoots = (referenceList ?? memberReferences(referencesFile)).filter(dir => !narrowed.some(root => inside(root, dir) || inside(dir, root)) && dir !== userHome && !inside(this.cwd, dir));
     this.scope = randomUUID(); // every process a command starts carries this marker, also a detached one
     this.setup = { narrowed, readOnly, repository, gitDirs, skills, identity: identity !== undefined ? identity : gitIdentity(this.git, this.cwd, userHome) };
     if (this.linux) {
-      this.references = referenceFolders(userHome).filter(dir => !narrowed.some(root => inside(root, dir) || inside(dir, root)));
+      this.references = this.referenceRoots;
       this.empty = path.join(this.temporary, 'empty');
       fs.writeFileSync(this.empty, '', { mode: 0o400 });
-      this.referenceCredentials = credentialFiles(this.references, { limit: 30_000 });
-      this.projectCredentials = { at: 0, files: [] };
     } else {
       this.proxyPorts = proxyPorts ?? localProxyPorts();
       this.proxyCheck = { at: 0, listening: Promise.resolve(false) };
@@ -201,8 +201,8 @@ export class ManagedToolBoundary {
     const port = this.proxyUrl && !this.linux ? Number(new URL(this.proxyUrl).port) : null;
     if (!this.linux) {
       const proxy = port ? { proxyPort: port } : {};
-      this.profile = managedSeatbelt({ ...this.base, references: this.userHome, ...proxy });
-      this.isolatedProfile = managedSeatbelt({ ...this.base, references: this.userHome, loopback: false, ...proxy }); // while a local proxy listens
+      this.profile = managedSeatbelt({ ...this.base, references: this.referenceRoots, ...proxy });
+      this.isolatedProfile = managedSeatbelt({ ...this.base, references: this.referenceRoots, loopback: false, ...proxy }); // while a local proxy listens
     }
     if (!this.proxyUrl) return;
     const offline = this.environment.offline;
@@ -319,8 +319,8 @@ export class ManagedToolBoundary {
   }
   // bubblewrap arguments for one command; credential files of the project are looked for again every 15 seconds.
   bubblewrap(network, docker = false) {
-    if (Date.now() - this.projectCredentials.at > 15_000) this.projectCredentials = { at: Date.now(), files: credentialFiles([this.cwd, ...this.linuxBase.repository]) };
-    const credentials = [...this.projectCredentials.files, ...(network ? [] : this.referenceCredentials)];
+    // Credential files are looked for again for every command (a file made a moment ago is covered), project and reference folders alike.
+    const credentials = [...credentialFiles([this.cwd, ...this.linuxBase.repository]), ...(network ? [] : credentialFiles(this.references, { limit: 30_000 }))];
     const { engineRoots, ...base } = this.linuxBase;
     return bubblewrapArgs({ ...base, references: network ? [] : base.references, network, credentials, proxySocket: network ? null : this.proxySocket,
       ...(docker ? { docker: this.engine.socket, toolchains: [...base.toolchains, ...engineRoots] } : {}) });

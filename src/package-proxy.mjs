@@ -28,6 +28,8 @@ export const DEFAULT_DOMAINS = Object.freeze([
   'github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com',
 ]);
 const PORTS = new Set([80, 443]);
+// What one tunnel may send to a registry. Installs send requests, not files: a bulk upload through an allowed host is cut.
+const UPLOAD_LIMIT = 8 * 1024 * 1024;
 const FORBIDDEN = 'HTTP/1.1 403 Forbidden\r\nX-Piagent-Proxy: domain-not-allowed\r\nContent-Length: 0\r\n\r\n';
 const BAD_GATEWAY = 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n';
 
@@ -60,9 +62,9 @@ function upstreamProxy(env) {
 export class PackageProxy {
   #server; #sockets = new Set();
   // `ports`, `resolve` and `isPrivate` let tests point an allowed name at a local fake registry.
-  constructor({ domains = DEFAULT_DOMAINS, resolve = name => lookup(name, { all: true }), env = process.env, maxDenied = 200, ports = PORTS, isPrivate = privateAddress } = {}) {
+  constructor({ domains = DEFAULT_DOMAINS, resolve = name => lookup(name, { all: true }), env = process.env, maxDenied = 200, ports = PORTS, isPrivate = privateAddress, uploadLimit = UPLOAD_LIMIT } = {}) {
     this.domains = [...new Set(domains.map(name => name.toLowerCase()))];
-    Object.assign(this, { resolve, maxDenied, isPrivate, ports: new Set(ports), upstream: upstreamProxy(env), log: [], deniedCount: 0 });
+    Object.assign(this, { resolve, maxDenied, isPrivate, uploadLimit, ports: new Set(ports), upstream: upstreamProxy(env), log: [], deniedCount: 0 });
     this.#server = http.createServer((request, response) => this.#forward(request, response));
     this.#server.on('connect', (request, socket, head) => this.#tunnel(request, socket, head));
     this.#server.on('connection', socket => { this.#sockets.add(socket); socket.once('close', () => this.#sockets.delete(socket)); });
@@ -105,10 +107,16 @@ export class PackageProxy {
     upstream.on('error', () => { if (socket.writable) socket.end(BAD_GATEWAY); });
     socket.on('close', () => upstream.destroy());
   }
+  #pipe(upstream, socket) {
+    let sent = 0;
+    upstream.pipe(socket);
+    socket.on('data', chunk => { sent += chunk.length; if (sent > this.uploadLimit) { socket.destroy(); upstream.destroy(); } });
+    socket.pipe(upstream);
+  }
   #join(upstream, socket, head) {
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     if (head?.length) upstream.write(head);
-    upstream.pipe(socket); socket.pipe(upstream);
+    this.#pipe(upstream, socket);
   }
   #viaUpstream(upstream, socket, head, target) {
     upstream.write(`CONNECT ${authority(target)} HTTP/1.1\r\nHost: ${authority(target)}\r\n\r\n`);
@@ -122,7 +130,7 @@ export class PackageProxy {
       socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (reply.length > end + 4) socket.write(reply.subarray(end + 4));
       if (head?.length) upstream.write(head);
-      upstream.pipe(socket); socket.pipe(upstream);
+      this.#pipe(upstream, socket);
     };
     upstream.on('data', onData);
   }

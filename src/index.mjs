@@ -36,6 +36,7 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
   const { api, sdkRoot: root } = await loadSdk(sdkRoot);
   const agentDir = process.env.PI_CODING_AGENT_DIR;
   const boundary = new ManagedToolBoundary({ cwd, sdkRoot: root, userHome, domainsFile: domainsFile ?? process.env.PIAGENT_SANDBOX_DOMAINS ?? (agentDir && path.join(agentDir, 'sandbox-domains')),
+    referencesFile: process.env.PIAGENT_SANDBOX_REFERENCES ?? (agentDir && path.join(agentDir, 'sandbox-references')),
     ...boundaryOptions });
   const permission = new Permission({ persist: data => pi.appendEntry(ENTRY, data), onChange: mode => pi.events.emit('piagent:permission.mode', { v: CONTRACT, mode }) });
   const approvals = new Approvals();

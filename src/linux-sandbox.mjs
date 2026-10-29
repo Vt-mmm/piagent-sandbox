@@ -80,12 +80,16 @@ export function bubblewrapArgs({ cwd, sdkRoot, runtimeRoot, temporary, empty, no
   ];
 }
 
-// The member's own folders for reference: the home folder's entries except
-// hidden ones (and the Windows profile's, from WSL, except AppData).
-export function referenceFolders(userHome, windowsHome = null) {
-  const list = (home, skip = () => false) => {
-    try { return fs.readdirSync(home, { withFileTypes: true }).filter(entry => !entry.name.startsWith('.') && !skip(entry.name)).map(entry => path.join(home, entry.name)); }
-    catch { return []; }
-  };
-  return [...list(userHome), ...(windowsHome ? list(windowsHome, name => /^(AppData|NTUSER|ntuser)/i.test(name)) : [])];
+// The folders the member chose for reference: one absolute path per line in `file` (# comments), real directories only, at most 50.
+// Same file on macOS and Linux. The home folder as a whole is never offered.
+export function memberReferences(file) {
+  let text = '';
+  try { if (file) text = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  const out = [];
+  for (const line of text.split('\n')) {
+    const entry = line.replace(/#.*/, '').trim();
+    if (!entry || !path.isAbsolute(entry) || /[\x00-\x1f\x7f"\\]/.test(entry)) continue;
+    try { const real = fs.realpathSync(entry); if (fs.statSync(real).isDirectory() && real !== '/') out.push(real); } catch { /* absent */ }
+  }
+  return [...new Set(out)].slice(0, 50);
 }

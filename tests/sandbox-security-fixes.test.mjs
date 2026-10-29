@@ -133,3 +133,31 @@ test('T5: every secret shape of the shared corpus is redacted from tool output',
   const { NEEDLES, SECRETS } = await import('./fixtures/secret-corpus.mjs');
   for (const [i, secret] of SECRETS.entries()) assert.ok(!redactedText(`out ${secret} end`).includes(NEEDLES[i]), `leaked: ${NEEDLES[i]}`);
 });
+
+test('T2: the home folder is closed except the folders the member chose', { skip: !darwin }, async () => {
+  const chosen = path.join(world.home, 'work/api'), other = path.join(world.home, 'Documents/notes');
+  for (const dir of [chosen, other]) { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, 'a.txt'), 'REFERENCE-TEXT\n'); }
+  const refs = openBoundary(world, { references: [chosen] });
+  try {
+    const read = file => attempt(refs.call('read', { path: file }));
+    assert.match((await read(path.join(chosen, 'a.txt'))).out, /REFERENCE-TEXT/);
+    assert.equal((await read(path.join(other, 'a.txt'))).ok, false, 'a folder the member did not choose');
+    assert.equal((await attempt(refs.call('bash', { command: `cat '${path.join(other, 'a.txt')}'` }))).ok, false);
+  } finally { await refs.boundary.dispose(); }
+});
+
+test('T4: a tunnel to an allowed registry is cut after the upload limit', async () => {
+  const net = await import('node:net');
+  const { PackageProxy } = await import('../src/package-proxy.mjs');
+  const sink = net.createServer(socket => socket.on('data', () => {}).on('error', () => {})); await new Promise(r => sink.listen(0, '127.0.0.1', r));
+  const proxy = new PackageProxy({ domains: ['registry.npmjs.org'], resolve: () => [{ address: '127.0.0.1' }], isPrivate: () => false, ports: [sink.address().port], uploadLimit: 100_000 });
+  const { port } = await proxy.listen();
+  const closed = await new Promise(resolve => {
+    const socket = net.connect(port, '127.0.0.1', () => socket.write(`CONNECT registry.npmjs.org:${sink.address().port} HTTP/1.1\r\nHost: x\r\n\r\n`));
+    let ok = false;
+    socket.on('data', chunk => { if (!ok && /200/.test(String(chunk))) { ok = true; const big = Buffer.alloc(50_000); for (let i = 0; i < 10; i += 1) socket.write(big); } });
+    socket.on('close', () => resolve(true)); socket.on('error', () => resolve(true)); setTimeout(() => resolve(false), 5000);
+  });
+  assert.equal(closed, true, 'the tunnel stayed open after 500 kB');
+  await proxy.close(); sink.close();
+});
