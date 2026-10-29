@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { REPO, sdk } from './world.mjs';
 
-// Loads this package into a real Pi 1.3.0 session (no model, in memory) the way `pi -e <package>` does, and reports what Pi sees.
+// Loads this package into a real Pi 1.4.0 session (no model, in memory) the way `pi -e <package>` does, and reports what Pi sees.
 // The process moves into the project and takes a fake HOME: the extension reads both when it loads.
 export async function loadInPi(world, { probe } = {}) {
   const agentDir = path.join(world.root, 'agent');

@@ -15,7 +15,7 @@ import { BWRAP, bubblewrapArgs, credentialFiles, memberReferences } from './linu
 import { inside, managedSeatbelt } from './seatbelt.mjs';
 import { runSafeGit } from './safe-git.mjs';
 
-export const PI_VERSION = '1.3.0';
+export const PI_VERSION = '1.4.0';
 export const TOOL_NAMES = Object.freeze(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']);
 const MAX_WIRE_BYTES = 12 * 1024 * 1024;
 const workerPath = fileURLToPath(new URL('./tool-worker.mjs', import.meta.url));
@@ -67,14 +67,28 @@ function repositoryRoots(git, cwd, temporary) {
 }
 // Pi's grep/find need ripgrep and fd and would download them, which the sandbox forbids: copy installed binaries into the
 // sandbox's agent dir; without them the worker falls back to the built-in search.
+// Files the search never reads. Pi 1.4.0 runs `rg --no-config`, which ignores the sandbox's .ripgreprc, so the same globs are also put in
+// front of the arguments of the `rg` Pi finds (a shell wrapper around the copied binary). Globs go before a `--`, never after it.
+const SECRET_GLOBS = ['.env', '.env.*', '.env/**', 'auth.json', 'credentials', 'credentials.*', 'credentials/**', '.npmrc', '.netrc'];
+const rgWrapper = () => `#!/bin/sh
+here="\${0%/*}"
+n=$#; sep=0
+while [ "$n" -gt 0 ]; do
+  a="$1"; shift; n=$((n - 1))
+  if [ "$sep" = 0 ] && [ "$a" = "--" ]; then set -- "$@" ${SECRET_GLOBS.map(glob => `'--glob=!${glob}'`).join(' ')} --; sep=1; else set -- "$@" "$a"; fi
+done
+[ "$sep" = 0 ] && set -- "$@" ${SECRET_GLOBS.map(glob => `'--glob=!${glob}'`).join(' ')}
+exec "$here/rg-real" "$@"
+`;
 function provisionSearchTools(home, agentDir, userHome) {
-  fs.writeFileSync(path.join(home, '.ripgreprc'), ['.env', '.env.*', '.env/**', 'auth.json', 'credentials', 'credentials.*', 'credentials/**', '.npmrc', '.netrc']
-    .map(glob => `--glob=!${glob}`).join('\n') + '\n', { mode: 0o600 });
+  fs.writeFileSync(path.join(home, '.ripgreprc'), SECRET_GLOBS.map(glob => `--glob=!${glob}`).join('\n') + '\n', { mode: 0o600 });
   const bin = path.join(agentDir, 'bin');
   fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
   for (const name of ['rg', 'fd']) {
     const source = searchToolPath(name, userHome);
-    if (source) { fs.copyFileSync(source, path.join(bin, name)); fs.chmodSync(path.join(bin, name), 0o755); }
+    if (!source) continue;
+    fs.copyFileSync(source, path.join(bin, name === 'rg' ? 'rg-real' : name)); fs.chmodSync(path.join(bin, name === 'rg' ? 'rg-real' : name), 0o755);
+    if (name === 'rg') fs.writeFileSync(path.join(bin, 'rg'), rgWrapper(), { mode: 0o755 });
   }
 }
 function playwrightBrowsers(userHome) {

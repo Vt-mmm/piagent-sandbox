@@ -5,7 +5,7 @@ import { after, before, test } from 'node:test';
 import { REPO, makeWorld } from './helpers/world.mjs';
 import { loadInPi } from './helpers/pi-session.mjs';
 
-// Acceptance C1: the seven built-in tools are replaced by the sandbox's, as stock Pi 1.3.0 reports them.
+// Acceptance C1: the seven built-in tools are replaced by the sandbox's, as stock Pi 1.4.0 reports them.
 const CORE = ['bash', 'read', 'edit', 'write', 'grep', 'find', 'ls'];
 const world = makeWorld();
 let pi;
