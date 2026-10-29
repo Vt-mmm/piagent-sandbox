@@ -13,6 +13,7 @@ import { guardFetch } from './fetch-guard.mjs';
 import { webFetchTool } from './web-fetch.mjs';
 import { mcpWriteAction } from './handoff-policy.mjs';
 import { redactedText } from './redact.mjs';
+import { claimNonce, nonceOk, withNonce } from './bus-nonce.mjs';
 
 // piagent-sandbox: the sandboxed tools of Piagent company mode on stock Pi. Registering `bash`, `read`, `edit`, `write`, `grep`,
 // `find` and `ls` under their built-in names replaces Pi's own; every call then runs in a fresh Seatbelt (macOS) or bubblewrap
@@ -39,7 +40,8 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
   const boundary = new ManagedToolBoundary({ cwd, sdkRoot: root, userHome, domainsFile: domainsFile ?? process.env.PIAGENT_SANDBOX_DOMAINS ?? (agentDir && path.join(agentDir, 'sandbox-domains')),
     referencesFile: process.env.PIAGENT_SANDBOX_REFERENCES ?? (agentDir && path.join(agentDir, 'sandbox-references')),
     ...boundaryOptions });
-  const permission = new Permission({ persist: data => pi.appendEntry(ENTRY, data), onChange: mode => pi.events.emit('piagent:permission.mode', { v: CONTRACT, mode }) });
+  claimNonce(pi.events, 'sandbox'); // the bus secret of the harness, when there is one (bus-nonce.mjs)
+  const permission = new Permission({ persist: data => pi.appendEntry(ENTRY, data), onChange: mode => pi.events.emit('piagent:permission.mode', withNonce(pi.events, { v: CONTRACT, mode })) });
   const approvals = new Approvals();
   let turn = 0, running = false;
   const checkpoints = new TurnCheckpoints(boundary.cwd, { busy: () => running, git: boundary.git });
@@ -48,7 +50,7 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
 
   const tools = [...boundary.tools(api), ...commandTools(owner, deps.commands), fetchOriginTool(owner, deps.fetchOrigin), webFetchTool(deps.webFetch), ...processTools(owner)];
   for (const tool of tools) pi.registerTool(tool);
-  const attest = () => pi.events.emit('piagent:tools.attest', { v: CONTRACT, tools: tools.map(tool => ({ name: tool.name, source: SOURCE })) });
+  const attest = () => pi.events.emit('piagent:tools.attest', withNonce(pi.events, { v: CONTRACT, tools: tools.map(tool => ({ name: tool.name, source: SOURCE })) }));
 
   // Helpers get read, grep, find, ls (and bash without network when `commands`) on a read-only boundary of their own; never edit or write.
   const children = new Map();
@@ -56,6 +58,7 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
   pi.events.on('piagent:tools.child', async request => {
     const reply = typeof request?.reply === 'function' ? request.reply : () => {};
     try {
+      if (!nonceOk(pi.events, request)) throw new Error('managed-bus-nonce');
       if (request.readOnly !== true || typeof request.key !== 'string') throw new Error('managed-tools-child-invalid');
       await closeChild(request.key);
       const child = new ManagedToolBoundary({ cwd, sdkRoot: root, userHome, readOnly: true, commands: request.commands === true, ...boundaryOptions });
@@ -63,8 +66,8 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
       reply({ v: CONTRACT, ok: true, tools: child.tools(api) });
     } catch (error) { reply({ v: CONTRACT, ok: false, error: String(error?.message ?? error) }); }
   });
-  pi.events.on('piagent:tools.child.close', request => { if (typeof request?.key === 'string') closeChild(request.key); });
-  pi.events.on('piagent:run.state', state => permission.allowBypass(state?.harness?.bypassMode === true));
+  pi.events.on('piagent:tools.child.close', request => { if (nonceOk(pi.events, request) && typeof request?.key === 'string') closeChild(request.key); });
+  pi.events.on('piagent:run.state', state => nonceOk(pi.events, state) && permission.allowBypass(state?.harness?.bypassMode === true));
   pi.on('session_start', (_event, ctx) => { permission.restore(ctx.sessionManager.getEntries()); attest(); });
   pi.on('before_agent_start', event => { if (event.messageType === 'user') turn += 1; running = true; attest(); });
   pi.on('agent_settled', async () => { running = false; await boundary.stopStrays(); });

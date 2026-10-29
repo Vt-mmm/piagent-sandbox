@@ -222,3 +222,22 @@ test('L6: bubblewrap drops capabilities and uses a user namespace', async () => 
   const args = bubblewrapArgs({ cwd: '/p', sdkRoot: '/s', runtimeRoot: '/r', temporary: '/t', empty: '/e', node: '/n/node' });
   assert.ok(args.join(' ').includes('--cap-drop ALL') && args.includes('--unshare-user-try'));
 });
+
+test('T1: Bypass is switched on only by a run.state that carries the bus secret of the harness', async () => {
+  const { loadWithFakePi, fakePi } = await import('./helpers/fake-pi.mjs');
+  const { serveNonce, withNonce } = await import('../src/bus-nonce.mjs');
+  const host = fakePi();
+  serveNonce(host.pi.events);
+  const { createSandbox } = await import('../src/index.mjs');
+  const { SDK_ROOT } = await import('./helpers/world.mjs');
+  const sandbox = await createSandbox(host.pi, { cwd: world.project, sdkRoot: SDK_ROOT, userHome: world.home, boundary: { proxyPorts: [] } });
+  try {
+    host.pi.events.emit('piagent:run.state', { v: 1, harness: { bypassMode: true } });
+    assert.equal(sandbox.permission.bypassAllowed, false, 'another extension cannot allow Bypass');
+    host.pi.events.emit('piagent:run.state', withNonce(host.pi.events, { v: 1, harness: { bypassMode: true } }));
+    assert.equal(sandbox.permission.bypassAllowed, true);
+    const reply = []; host.pi.events.emit('piagent:tools.child', { v: 1, readOnly: true, key: 'x', reply: value => reply.push(value) });
+    await new Promise(r => setTimeout(r, 50));
+    assert.deepEqual([reply[0].ok, reply[0].error], [false, 'managed-bus-nonce'], 'read-only tools are not handed to a stranger');
+  } finally { await sandbox.boundary.dispose(); }
+});
