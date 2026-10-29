@@ -10,6 +10,7 @@ import { processTools } from './background-process.mjs';
 import { TurnCheckpoints } from './checkpoints.mjs';
 import { TsDiagnostics } from './ts-diagnostics.mjs';
 import { guardFetch } from './fetch-guard.mjs';
+import { webFetchTool } from './web-fetch.mjs';
 import { mcpWriteAction } from './handoff-policy.mjs';
 import { redactedText } from './redact.mjs';
 
@@ -45,7 +46,7 @@ export async function createSandbox(pi, { cwd = process.cwd(), sdkRoot, userHome
   const ts = new TsDiagnostics(boundary);
   const owner = { boundary, cwd: boundary.cwd, permission, approvals, checkpoints, hosts: new Set(), turn: () => turn, processOptions: deps.processOptions };
 
-  const tools = [...boundary.tools(api), ...commandTools(owner, deps.commands), fetchOriginTool(owner, deps.fetchOrigin), ...processTools(owner)];
+  const tools = [...boundary.tools(api), ...commandTools(owner, deps.commands), fetchOriginTool(owner, deps.fetchOrigin), webFetchTool(deps.webFetch), ...processTools(owner)];
   for (const tool of tools) pi.registerTool(tool);
   const attest = () => pi.events.emit('piagent:tools.attest', { v: CONTRACT, tools: tools.map(tool => ({ name: tool.name, source: SOURCE })) });
 

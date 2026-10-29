@@ -63,7 +63,7 @@ export function bubblewrapArgs({ cwd, sdkRoot, runtimeRoot, temporary, empty, no
   const mounts = [...readable.map(dir => ['--ro-bind', dir]), ...writable.map(dir => ['--bind', dir])]
     .sort((a, b) => depth(a[1]) - depth(b[1]) || (a[0] === '--ro-bind' ? -1 : 1));
   return [
-    '--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
+    '--die-with-parent', '--new-session', '--cap-drop', 'ALL', '--unshare-user-try', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
     ...(network ? [] : ['--unshare-net']),
     ...SYSTEM.filter(exists).flatMap(dir => ['--ro-bind', dir, dir]),
     '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--bind', temporary, temporary,

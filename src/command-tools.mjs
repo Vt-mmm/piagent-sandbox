@@ -50,6 +50,12 @@ const KINDS = {
 };
 // The reason every mode asks about a command, as the card shows it; Ask first needs none.
 const alwaysAsk = (owner, reason) => (owner.permission.mode === 'ask' ? 'ask' : reason);
+// The command as the card shows it: control characters (ANSI, \r, bidi marks) cannot hide or rewrite a part of it, and a very long one is
+// shown from both ends with the cut named, so the dangerous part cannot sit unseen in the middle.
+export function shownCommand(command) {
+  const clean = String(command).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, ch => `\\u{${ch.codePointAt(0).toString(16)}}`);
+  return clean.length <= 1200 ? clean : `${clean.slice(0, 500)}\n[… ${clean.length - 1000} characters hidden: the command is longer than the card shows …]\n${clean.slice(-500)}`;
+}
 const DENIED_TEXT = 'Từ chối: lệnh không chạy, agent được báo bạn đã từ chối.';
 const textResult = text => ({ content: [{ type: 'text', text }], details: undefined });
 
@@ -80,7 +86,7 @@ export function commandTools(owner, deps = {}) {
         if (confirm !== null) {
           const why = confirm === 'ask' ? null : stillAsks(owner.permission.mode, confirm);
           await owner.approvals.request(ctx, { key: `${spec.name} ${args.command}`, title: spec.title,
-            body: `${args.command}\n\nLý do: ${args.reason}${why ? `\n${why.vi}` : ''}\n\nĐồng ý: ${spec.allowText}\n${DENIED_TEXT}` }, signal);
+            body: `${shownCommand(args.command)}\n\nLý do: ${args.reason}${why ? `\n${why.vi}` : ''}\n\nĐồng ý: ${spec.allowText}\n${DENIED_TEXT}` }, signal);
         }
         await owner.checkpoints?.take(owner.turn?.());
         try {

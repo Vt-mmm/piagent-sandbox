@@ -353,7 +353,8 @@ export class ManagedToolBoundary {
     if (!this.linux) await stopMarked(`PIAGENT_PROCESS_SCOPE=${this.scope}:`);
     await this.proxyReady;
     await this.proxy?.close().catch(() => {});
-    if (this.proxySocket) fs.rmSync(this.proxySocket, { force: true });
+    if (this.proxySocketDir) fs.rmSync(this.proxySocketDir, { recursive: true, force: true });
+    else if (this.proxySocket) fs.rmSync(this.proxySocket, { force: true });
     fs.rmSync(this.temporary, { recursive: true, force: true });
   }
 }

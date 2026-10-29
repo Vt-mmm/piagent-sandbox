@@ -161,3 +161,64 @@ test('T4: a tunnel to an allowed registry is cut after the upload limit', async 
   assert.equal(closed, true, 'the tunnel stayed open after 500 kB');
   await proxy.close(); sink.close();
 });
+
+test('T9: web_fetch refuses private and local addresses, rebinding, IP literals, other ports, redirects to other hosts and non-text', async () => {
+  const { safeFetch } = await import('../src/web-fetch.mjs');
+  const page = (extra = {}) => ({ status: 200, headers: { 'content-type': 'text/html' }, body: Buffer.from('<p>hi</p>'), ...extra });
+  const seen = [];
+  const options = (answers, resolved = [{ address: '93.184.216.34' }]) => ({ resolve: async () => resolved, transport: async (url, ip) => { seen.push(ip); return answers.shift(); } });
+  assert.match((await safeFetch('https://docs.example.invalid/x', options([page()]))).text, /hi/);
+  assert.deepEqual(seen, ['93.184.216.34'], 'the connection goes to the address that was checked');
+  const refused = async (raw, opts, pattern) => assert.rejects(safeFetch(raw, opts), pattern, raw);
+  await refused('https://internal.example.invalid/', options([page()], [{ address: '10.0.0.5' }]), /private or local/);
+  await refused('https://rebind.example.invalid/', options([page()], [{ address: '93.184.216.34' }, { address: '169.254.169.254' }]), /private or local/);
+  await refused('https://127.0.0.1/', options([page()]), /IP number/);
+  await refused('https://[::1]/', options([page()]), /IP number/);
+  await refused('http://docs.example.invalid/', options([page()]), /only https/);
+  await refused('https://docs.example.invalid:8443/', options([page()]), /port 443/);
+  await refused('https://user:pw@docs.example.invalid/', options([page()]), /login/);
+  await refused('https://docs.example.invalid/a', options([{ status: 302, headers: { location: 'https://evil.example.invalid/?d=1' } }]), /another host/);
+  await refused('https://docs.example.invalid/a', options([{ status: 302, headers: { location: 'http://docs.example.invalid/' } }]), /only https/);
+  await refused('https://docs.example.invalid/a', options([page({ headers: { 'content-type': 'application/zip' } })]), /not text/);
+  const same = await safeFetch('https://docs.example.invalid/a', options([{ status: 301, headers: { location: '/b' } }, page()]));
+  assert.equal(same.url, 'https://docs.example.invalid/b');
+});
+
+test('L2: the confirmation card shows control characters as text and a long command from both ends', async () => {
+  const { shownCommand } = await import('../src/command-tools.mjs');
+  const shown = shownCommand('echo ok\r\u001b[2Kecho hidden‮');
+  assert.ok(!/[\u001b\r‮]/.test(shown) && shown.includes('\\u{1b}') && shown.includes('\\u{d}'));
+  const long = shownCommand(`safe ${'a'.repeat(5000)} rm -rf ~`);
+  assert.ok(long.length < 1200 && long.includes('rm -rf ~') && /characters hidden/.test(long));
+});
+
+test('L4: the package proxy on a loopback port refuses a client without the per-run secret', async () => {
+  const net = await import('node:net');
+  const { PackageProxy } = await import('../src/package-proxy.mjs');
+  const proxy = new PackageProxy({ domains: ['registry.npmjs.org'], secret: 's3cret-value', resolve: () => [{ address: '127.0.0.1' }], isPrivate: () => false });
+  const { port } = await proxy.listen();
+  const ask = auth => new Promise(resolve => {
+    const socket = net.connect(port, '127.0.0.1', () => socket.write(`CONNECT registry.npmjs.org:443 HTTP/1.1\r\nHost: x\r\n${auth}\r\n`));
+    socket.once('data', chunk => { resolve(String(chunk).split('\r\n')[0]); socket.destroy(); }); socket.on('error', () => resolve('error'));
+  });
+  assert.match(await ask(''), /407/);
+  assert.match(await ask(`Proxy-Authorization: Basic ${Buffer.from('piagent:wrong').toString('base64')}\r\n`), /407/);
+  assert.doesNotMatch(await ask(`Proxy-Authorization: Basic ${Buffer.from('piagent:s3cret-value').toString('base64')}\r\n`), /407/);
+  await proxy.close();
+});
+
+test('L5: fetch_origin refuses a path that climbs out of the project, also through a link, and accepts a folder named ..x', async () => {
+  const { fetchPlan } = await import('../src/fetch-origin.mjs');
+  const os = await import('node:os');
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fo-'))), outside = fs.mkdtempSync(path.join(os.tmpdir(), 'fo-out-'));
+  fs.mkdirSync(path.join(dir, '..x')); fs.symlinkSync(outside, path.join(dir, 'link'));
+  await assert.rejects(fetchPlan(dir, '../'), /managed-path-invalid/);
+  await assert.rejects(fetchPlan(dir, 'link'), /managed-path-invalid/);
+  await assert.rejects(fetchPlan(dir, '..x'), error => !/managed-path-invalid/.test(error.message), 'a folder named ..x is inside the project');
+});
+
+test('L6: bubblewrap drops capabilities and uses a user namespace', async () => {
+  const { bubblewrapArgs } = await import('../src/linux-sandbox.mjs');
+  const args = bubblewrapArgs({ cwd: '/p', sdkRoot: '/s', runtimeRoot: '/r', temporary: '/t', empty: '/e', node: '/n/node' });
+  assert.ok(args.join(' ').includes('--cap-drop ALL') && args.includes('--unshare-user-try'));
+});
