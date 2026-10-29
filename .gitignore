@@ -1,0 +1,7 @@
+node_modules/
+.env
+.env.*
+auth.json
+*.log
+.pi/memory/
+.pi/sessions/
