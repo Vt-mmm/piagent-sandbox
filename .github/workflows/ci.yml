@@ -27,3 +27,31 @@ jobs:
           bwrap --ro-bind / / --unshare-net true
       - run: npm ci
       - run: npm test
+  # Windows members use the Linux sandbox through WSL2: run the same suite inside Ubuntu on a Windows runner.
+  # The repository is copied to the distribution's own disk (ext4), as a member's project would be.
+  wsl:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          use-cache: false
+          additional-packages: bubblewrap curl ca-certificates git xz-utils
+      - name: Node 22 and the user-namespace check
+        shell: wsl-bash {0}
+        run: |
+          cat /proc/version
+          curl -fsSL https://nodejs.org/dist/v22.19.0/node-v22.19.0-linux-x64.tar.xz | sudo tar -xJ -C /usr/local --strip-components=1
+          node --version
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-net true
+          ls /mnt/c >/dev/null && echo "interop mount present"
+          test -e /proc/sys/fs/binfmt_misc/WSLInterop && echo "WSLInterop present" || echo "WSLInterop absent"
+      - name: Copy the repository into WSL and test
+        shell: wsl-bash {0}
+        run: |
+          mkdir -p ~/work && cp -R "$(wslpath "$GITHUB_WORKSPACE")/." ~/work/ && cd ~/work
+          npm ci
+          npm test
