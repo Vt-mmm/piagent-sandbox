@@ -2,15 +2,14 @@ import { spawn } from 'node:child_process';
 import { engineAlive, engineLauncher } from './container-engine.mjs';
 import { MEMBER_ONLY, credentialReason, memberOnlyReason, runHostCommand } from './host-command.mjs';
 import { handoffReason } from './handoff-policy.mjs';
-import { detachedEmulator, simulatorCommandReason } from './simulator-commands.mjs';
+import { detachedEmulator, runsProjectCode, simulatorCommandReason } from './simulator-commands.mjs';
 
 // Commands that leave the plain sandbox: run_with_network (internet, a local server or browser), run_with_docker when this
 // machine has Docker, run_on_host (the member's machine, outside the sandbox) and run_on_simulator. What each mode asks:
 // - Ask first: every command.
-// - Full access: run_with_network, run_with_docker and run_on_simulator run, except the handoff and destructive steps
-//   (mustConfirm); run_on_host asks every command.
-// - Bypass: network, Docker and simulator commands run, except the handoff (push, PR, publish, deploy, remote and cloud tools, uploads).
-//   run_on_host still asks every time.
+// - Full access and Bypass: run_with_network, run_with_docker and run_on_host ask every command (a command with the internet can send the
+//   project out; a container can mount any shared folder). run_on_simulator runs simctl, adb and emulator commands, and asks when
+//   the command runs a script of the project (xcodebuild, gradlew, pod, flutter, npx, ./tool): that script is code the agent can write.
 const PARAMETERS = { type: 'object', additionalProperties: false, required: ['command', 'reason'], properties: {
   command: { type: 'string', minLength: 1, maxLength: 4000 }, reason: { type: 'string', minLength: 1, maxLength: 300 }, timeout: { type: 'number', minimum: 1, maximum: 1800 } } };
 
@@ -18,17 +17,17 @@ const KINDS = {
   network: { name: 'run_with_network', label: 'Run with network', riskClass: 'medium', title: 'Chạy lệnh có internet',
     description: 'Run one shell command that needs the internet beyond the package registries bash already reaches (a download site or registry the package proxy refuses), '
       + 'or that starts a local server or a browser (end-to-end tests with Playwright\'s Chromium against a server on 127.0.0.1), after the user approves that exact command '
-      + '(Full access and Bypass run it without asking, but a push, publish, deploy or upload is always asked). Normal bash has no internet. '
+      + '(every mode asks, Bypass included: with the internet a command could send the project out). Normal bash has no internet. '
       + 'Credentials (.npmrc, SSH keys, Keychain) stay unavailable, so private registries and git push are not possible here.',
     allowText: 'chạy đúng lệnh này một lần, có internet; server nó mở nhận kết nối trong lúc chạy.',
-    confirm: (owner, command) => owner.permission.confirmation(command) },
+    confirm: owner => alwaysAsk(owner, 'with the internet a command can send the project out') },
   docker: { name: 'run_with_docker', label: 'Run with Docker', riskClass: 'high', title: 'Chạy lệnh dùng Docker',
     description: 'Run one shell command that needs the Docker engine of this machine: docker, docker compose (a database or service for tests), docker build, or tests that '
-      + 'start containers themselves (Testcontainers), after the user approves that exact command (Full access and Bypass run it without asking, but docker push or login '
-      + 'and any other handoff is always asked). It has internet access too. Mount only folders inside the project. Registry credentials are unavailable. '
+      + 'start containers themselves (Testcontainers), after the user approves that exact command (every mode asks, Bypass included: a container can mount any folder Docker shares). '
+      + 'It has internet access too. Mount only folders inside the project. Registry credentials are unavailable. '
       + 'Containers started in the background (-d, compose up -d) keep running after the command: stop them when the work is done unless the member wants them kept.',
     allowText: 'chạy đúng lệnh này một lần, có internet và Docker; container nó tạo có thể đọc thư mục Docker được chia sẻ trên máy và có thể tiếp tục chạy.',
-    confirm: (owner, command) => owner.permission.confirmation(command) },
+    confirm: owner => alwaysAsk(owner, 'a container can mount and change any folder Docker shares') },
   host: { name: 'run_on_host', label: 'Run on this machine', riskClass: 'high', title: 'Chạy lệnh trên máy (ngoài sandbox)',
     description: 'Run one shell command on the member\'s machine, outside the sandbox, as the member, after they approve that exact command (every mode asks, Bypass included; a push, PR, publish, '
       + 'deploy or a command that reaches credentials says why on the card). Use it when the sandbox blocks what the task needs and no other tool covers it: '
@@ -42,12 +41,15 @@ const KINDS = {
   simulator: { name: 'run_on_simulator', label: 'Run on simulator', riskClass: 'medium', title: 'Chạy lệnh simulator',
     description: 'Run one iOS Simulator or Android emulator command on the member\'s machine, outside the sandbox. iOS: xcrun simctl (list, boot, bootstatus -b, install, launch, '
       + 'terminate, openurl, io <device> screenshot <file>, ui appearance, status_bar, spawn <device> log show…), xcodebuild with a simulator destination, xcodegen generate, axe, '
-      + 'open -a Simulator. Android: adb, emulator -avd <name> (started in the background), avdmanager, ./gradlew installDebug. Also flutter, pod install, npx expo/react-native/cap, '
+      + 'open -a Simulator. Android: adb, emulator -avd <name> (started in the background), avdmanager, ./gradlew installDebug. Also flutter, pod install, npx expo/react-native/cap '
+      + '(build commands that run a script of the project are asked about in every mode), '
       + 'mkdir -p and cd inside the project. Parts may be joined by && or || and piped into grep, head, tail, xcbeautify or jq; files may be written only inside the project or to /dev/null. '
       + 'Read a screenshot you saved with read to see the screen. Other commands: run_on_host.',
     allowText: 'chạy đúng lệnh simulator/build app này một lần trên máy bạn, ngoài sandbox: build có thể chạy script build của project bằng quyền của bạn.',
-    confirm: (owner, command) => credentialReason(command) ?? owner.permission.confirmation(command) },
+    confirm: (owner, command) => credentialReason(command) ?? (runsProjectCode(command, owner.cwd) ? alwaysAsk(owner, 'the command runs a script of the project on this machine, outside the sandbox') : owner.permission.confirmation(command)) },
 };
+// The reason every mode asks about a command, as the card shows it; Ask first needs none.
+const alwaysAsk = (owner, reason) => (owner.permission.mode === 'ask' ? 'ask' : reason);
 const DENIED_TEXT = 'Từ chối: lệnh không chạy, agent được báo bạn đã từ chối.';
 const textResult = text => ({ content: [{ type: 'text', text }], details: undefined });
 

@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { credentialName } from './linux-sandbox.mjs';
+import { runSafeGit } from './safe-git.mjs';
 
 // What a turn's checkpoint sees of the project: the files git would list (tracked and untracked, .gitignore applied; a plain
 // walk outside a repository), minus credential files, links, dependency folders and very large files. It reads and writes
@@ -14,7 +14,7 @@ const MAX_FILES = 20_000;
 export function listProjectFiles(cwd, git = 'git') {
   let names;
   try {
-    names = execFileSync(git, ['-C', cwd, 'ls-files', '-co', '--exclude-standard', '-z'], { encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] })
+    names = runSafeGit(git, cwd, ['ls-files', '-co', '--exclude-standard', '-z'], { encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'ignore'] })
       .split('\0').filter(Boolean);
   } catch {
     names = [];

@@ -4,8 +4,14 @@ import path from 'node:path';
 // System libraries and toolchains are read-only; writes stay in the project and a fresh temporary directory.
 // There is no network exception and no unsandboxed fallback.
 const SYSTEM = ['/Library/Frameworks', '/Library/Java', '/Library/Apple', '/private/var/db/oah', '/private/var/db/timezone'];
-const CREDENTIAL_NAMES = String.raw`(^|/)(\.env([./]|$)|credentials([./]|$)|\.npmrc$|\.netrc$)`;
-const TEMPLATES = String.raw`(^|/)\.env\.(example|sample|template|dist|defaults)$`;
+// Names of files that hold credentials wherever they are (the project, a folder the member pointed to). Keep in step with credentialName
+// in linux-sandbox.mjs.
+const CREDENTIAL_NAMES = String.raw`(^|/)(\.env([-./_]|$)|credentials([./]|$)|\.(npmrc|netrc|pypirc|git-credentials|dev\.vars)$|secrets?\.(json|ya?ml|toml)$|id_(rsa|dsa|ecdsa|ed25519)(\.[^/]*)?$|serviceAccount[^/]*\.json$|[^/]+\.(pem|key|p12|pfx)$)`;
+// Committed templates and the public certificate bundles that pip and other tools ship (certifi's cacert.pem).
+const TEMPLATES = String.raw`(^|/)\.env[-._](example|sample|template|dist|defaults)$|cacert\.pem$`;
+// Files that make git run a program (config, hooks, attributes, submodule list): the agent may not write them, so git on the host
+// and the member's later commit or push never run what it planted. Matches any .git folder, a worktree's too.
+const GIT_EXEC_FILES = String.raw`(^|/)(\.git/([^/]+/)*(config|config\.worktree|hooks(/.*)?|info/attributes|modules/.+/config)|\.gitmodules|\.gitattributes)$`;
 
 export function literal(value) {
   if (typeof value !== 'string' || !path.isAbsolute(value) || /[\x00-\x1f\x7f]/.test(value)) throw new Error('managed-path-invalid');
@@ -34,7 +40,8 @@ export function managedSeatbelt({ cwd, sdkRoot, runtimeRoot, temporary, node, de
   // Credential files are unreadable, unwritable and hidden: a stat fails, so a tool that loads them when present
   // (Vite reads .env.local) carries on without them. auth.json holds credentials at a project's root or in a dot folder.
   const projectAuth = [...new Set([cwd, ...repository])].map(root => `(literal ${literal(path.join(root, 'auth.json'))})`).join(' ');
-  const trust = `(allow mach-lookup (global-name "com.apple.trustd.agent") (global-name "com.apple.SecurityServer") (global-name "com.apple.ocspd"))
+  // com.apple.SecurityServer (the keychain service) is reachable only for a command that was approved to use the network.
+  const trust = `(allow mach-lookup (global-name "com.apple.trustd.agent") (global-name "com.apple.ocspd")${network ? ' (global-name "com.apple.SecurityServer")' : ''})
 (allow file-read* (subpath "/private/var/db/mds") (literal "/Library/Keychains/System.keychain") (subpath "/Library/Security/Trust Settings"))`;
   // Every command may start servers and reach them (a test's own server, Playwright's Chromium). The rule names loopback;
   // a server it starts is reachable while it runs. Without approval nothing else is reached: no internet, no name lookups.
@@ -68,6 +75,8 @@ ${referenceRules(references, readRoots)}
 ${proxyPort && !network ? trust : ''}
 ${networkRules}
 ${denies}
+${gitDirs.map(dir => `(deny file-write* (literal ${literal(path.join(dir, 'config'))}) (literal ${literal(path.join(dir, 'config.worktree'))}) (subpath ${literal(path.join(dir, 'hooks'))}) (literal ${literal(path.join(dir, 'info/attributes'))}))`).join('\n')}
+(deny file-write* (regex #"${GIT_EXEC_FILES}") ${[...new Set([cwd, ...repository])].map(root => `(literal ${literal(path.join(root, '.git'))})`).join(' ')})
 (deny file-read* file-read-metadata file-write* (require-all (require-any (regex #"${CREDENTIAL_NAMES}") (regex #"/\\.[^/]+/auth\\.json$") ${projectAuth})
   (require-not (regex #"${TEMPLATES}"))))
 `;

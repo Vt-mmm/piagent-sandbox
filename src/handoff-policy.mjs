@@ -1,4 +1,7 @@
+import path from 'node:path';
 import { commandSegments, stripWrapper } from './shell-words.mjs';
+
+const SHELL_NAMES = new Set(['bash', 'sh', 'zsh', 'dash']);
 
 export { stripWrapper, commandSegments };
 
@@ -6,7 +9,7 @@ export { stripWrapper, commandSegments };
 // handoffReason: the work leaves this machine: push, pull request or merge, release, package publish, deploy,
 // registry push or login, remote shell, cloud or cluster tool, upload.
 // mustConfirm: the handoff plus what is destructive or irreversible here. Full access asks; Bypass runs these.
-const REMOTE = new Set(['ssh', 'scp', 'sftp', 'vercel', 'netlify', 'fly', 'flyctl', 'heroku', 'firebase', 'aws', 'gcloud', 'gsutil', 'az',
+const REMOTE = new Set(['ssh', 'nc', 'ncat', 'netcat', 'socat', 'telnet', 'ftp', 'sftp', 'tftp', 'scp', 'vercel', 'netlify', 'fly', 'flyctl', 'heroku', 'firebase', 'aws', 'gcloud', 'gsutil', 'az',
   'kubectl', 'helm', 'terraform', 'tofu', 'pulumi', 'eas', 'wrangler', 'supabase', 'railway', 'render', 'doctl']);
 const RUNNERS = new Set(['npx', 'bunx', 'pnpx']);
 const LAUNCHERS = new Map([['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])], ['xargs', new Set(['-I', '-n', '-P', '-L', '-d', '-s', '-E', '-a'])],
@@ -15,16 +18,21 @@ const PUBLISHERS = [['cargo', 'publish'], ['twine', 'upload'], ['gem', 'push'], 
   ['gradle', 'publish'], ['gradlew', 'publish'], ['poetry', 'publish'], ['uv', 'publish'], ['flutter', 'pub', 'publish'], ['dart', 'pub', 'publish'],
   ['vsce', 'publish'], ['ovsx', 'publish']];
 const DEPLOY_SCRIPT = /^(deploy|publish|release|push)([:_-]|$)/;
+const DEPLOY_FILE = /^(deploy|publish|release|push)([._:-]|$)/;
+const INLINE_FLAGS = { python: /^-[a-zA-Z]*c$/, python3: /^-[a-zA-Z]*c$/, node: /^(-[a-zA-Z]*[ep]|--eval|--print)$/, deno: /^eval$/, bun: /^(-e|--eval|--print|-p)$/,
+  ruby: /^-[a-zA-Z]*e$/, perl: /^-[a-zA-Z]*[eE]$/, php: /^-r$/ };
+const SUDO_VALUED = new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U', '-r', '-t', '--user', '--group', '--host', '--prompt', '--chdir', '--role', '--type']);
+const GH_VALUED = new Set(['-R', '--repo', '--hostname']);
 const GH_REMOTE = [['pr', 'create'], ['pr', 'merge'], ['pr', 'comment'], ['pr', 'review'], ['pr', 'close'], ['release', 'create'], ['release', 'upload'],
   ['issue', 'create'], ['issue', 'comment'], ['repo', 'create'], ['repo', 'delete'], ['workflow', 'run'], ['gist', 'create']];
-const UPLOAD_FLAGS = /^(-T|--upload-file|-d|--data(-\w+)?|-F|--form|--post-data|--post-file|--body-data|--body-file)$/;
+const UPLOAD_FLAGS = /^(-T|--upload-file|-d|--data(-\w+)?|-F|--form|--json|--post-data|--post-file|--body-data|--body-file)$/;
 
 function executable(words) {
   let current = stripWrapper(words);
   for (;;) {
     if (['sudo', 'doas'].includes(current[0])) {
       current = stripWrapper(current.slice(1));
-      while (current[0]?.startsWith('-')) current = current.slice(1);
+      while (current[0]?.startsWith('-')) current = current.slice(SUDO_VALUED.has(current[0]) ? 2 : 1);
       continue;
     }
     if (RUNNERS.has(current[0]) || (['pnpm', 'yarn'].includes(current[0]) && current[1] === 'dlx')) {
@@ -53,15 +61,28 @@ function executable(words) {
 const positional = args => args.filter(arg => !arg.startsWith('-'));
 
 function segmentHandoff(words) {
-  const [name, ...args] = executable(words);
+  const [name, ...rawArgs] = executable(words);
+  // Flags that take a value in front of the subcommand (gh -R o/r pr create) must not count as the subcommand.
+  const args = [];
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    if (name?.split('/').pop() === 'gh' && GH_VALUED.has(rawArgs[i])) { i += 1; continue; }
+    args.push(rawArgs[i]);
+  }
   const sub = positional(args);
   if (!name) return null;
   const base = name.split('/').pop();
   if (['npm', 'pnpm', 'yarn', 'bun'].includes(base) && ['run', 'run-script'].includes(sub[0]) && DEPLOY_SCRIPT.test(sub[1] ?? '')) return `${base} run ${sub[1]} deploys or publishes`;
+  if (['yarn', 'pnpm'].includes(base) && DEPLOY_SCRIPT.test(sub[0] ?? '')) return `${base} ${sub[0]} deploys or publishes`;
+  if ((DEPLOY_FILE.test(path.basename(name)) && name.includes('/')) || (SHELL_NAMES.has(base) && DEPLOY_FILE.test(path.basename(sub[0] ?? '')))) return 'a deploy or release script';
+  const inline = INLINE_FLAGS[base.replace(/\d[\d.]*$/, '')];
+  if (inline && args.some(arg => inline.test(arg))) return `${base} runs an inline script that can reach any site`;
+  if (base === 's_client' || (base === 'openssl' && sub[0] === 's_client')) return 'openssl opens a network connection';
   if (base === 'make' && sub.some(target => DEPLOY_SCRIPT.test(target))) return 'make runs a release or deploy target';
   if (REMOTE.has(base)) return `${base} reaches another machine or account`;
   if (base === 'git') {
     if (words.some((word, i) => (word === '-c' && /^alias\./i.test(words[i + 1] ?? '')) || /^-calias\./i.test(word))) return 'git runs an alias defined in the command';
+    if (sub[0] === 'config' && args.some(arg => /(^|\W)alias\./i.test(arg))) return 'git config defines an alias that can run any command';
+    if (sub[0] === 'svn' && sub[1] === 'dcommit') return 'git svn dcommit sends to a remote';
     if (['push', 'send-email', 'request-pull'].includes(sub[0])) return `git ${sub[0]} sends to a remote`;
     if (['subtree', 'lfs'].includes(sub[0]) && sub[1] === 'push') return `git ${sub[0]} push sends to a remote`;
     return null;
@@ -73,13 +94,23 @@ function segmentHandoff(words) {
     if (sub[0] === 'api' && verb && !/^get$/i.test(verb)) return 'gh api writes to GitHub';
     return null;
   }
+  if (base === 'hub' && ['pull-request', 'create', 'release', 'push', 'fork', 'issue'].includes(sub[0])) return `hub ${sub[0]} changes something on GitHub`;
+  if (base === 'glab' && ['mr', 'issue', 'release', 'repo', 'ci', 'pipeline'].includes(sub[0]) && ['create', 'merge', 'note', 'close', 'delete', 'run', 'update', 'upload'].includes(sub[1])) return `glab ${sub[0]} ${sub[1]} changes something on GitLab`;
   if (base === 'rsync' && args.some(arg => /^[^/\s]*:/.test(arg) && !arg.startsWith('-'))) return 'rsync to another machine';
   if (['curl', 'wget'].includes(base)) {
-    const writes = args.some((arg, i) => UPLOAD_FLAGS.test(arg) || (/^(-X|--request)$/.test(arg) && /^(POST|PUT|PATCH|DELETE)$/i.test(args[i + 1] ?? '')));
+    const verb = /^(POST|PUT|PATCH|DELETE)$/i;
+    const writes = args.some((arg, i) => {
+      const flag = arg.startsWith('--') ? arg.split('=')[0] : arg;
+      if (UPLOAD_FLAGS.test(flag) && !(base === 'wget' && flag === '-T')) return true;
+      if (base === 'curl' && /^-[a-zA-Z]*[dFT]./.test(arg) && !arg.startsWith('--')) return true;
+      if (/^(-X|--request)$/.test(flag)) return verb.test(arg.includes('=') ? arg.split('=')[1] : args[i + 1] ?? '');
+      return /^-X./.test(arg) && !arg.startsWith('--') && verb.test(arg.slice(2));
+    });
     return writes ? `${base} uploads data to a site` : null;
   }
   if (['docker', 'podman'].includes(base)) {
-    if (['push', 'login'].includes(sub[0])) return `${base} ${sub[0]} sends to a registry`;
+    if (args.some((arg, i) => (/^(-H|--host)$/.test(arg) && /^(ssh|tcp):/.test(args[i + 1] ?? '')) || /^(--host=|-H)(ssh|tcp):/.test(arg))) return `${base} talks to a remote engine`;
+    if (['push', 'login'].includes(sub[0]) || (['image', 'manifest'].includes(sub[0]) && sub[1] === 'push') || (sub[0] === 'compose' && sub[1] === 'push')) return `${base} ${sub.slice(0, sub[0] === 'compose' || sub[0] === 'image' || sub[0] === 'manifest' ? 2 : 1).join(' ')} sends to a registry`;
     if (args.includes('--push')) return `${base} build --push sends to a registry`;
     return null;
   }

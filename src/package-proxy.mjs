@@ -13,13 +13,16 @@ export { privateAddress };
 // it checked. With a company upstream proxy (HTTPS_PROXY) the upstream is asked for the checked
 // address, never the name. Everything else gets 403 and is remembered, so the failing command can
 // name the host and run_with_network.
+// Not listed on purpose: hosts that fetch from a server named in the request path, which turn the proxy into a relay for data
+// (proxy.golang.org/<attacker host>/<data>/@v/list, jitpack.io, deno.land/x). A member who needs them adds them to the domains file
+// or runs the command with run_with_network.
 export const DEFAULT_DOMAINS = Object.freeze([
-  'registry.npmjs.org', 'registry.yarnpkg.com', 'repo.yarnpkg.com', 'registry.npmmirror.com', 'jsr.io', 'npm.jsr.io', 'deno.land',
+  'registry.npmjs.org', 'registry.yarnpkg.com', 'repo.yarnpkg.com', 'registry.npmmirror.com', 'jsr.io', 'npm.jsr.io',
   'pypi.org', 'files.pythonhosted.org',
-  'proxy.golang.org', 'sum.golang.org', 'index.golang.org',
+  'sum.golang.org', 'index.golang.org',
   'crates.io', 'index.crates.io', 'static.crates.io', 'static.rust-lang.org',
   'repo.maven.apache.org', 'repo1.maven.org', 'maven.google.com', 'dl.google.com', 'plugins.gradle.org', 'plugins-artifacts.gradle.org',
-  'services.gradle.org', 'downloads.gradle.org', 'repo.spring.io', 'jitpack.io',
+  'services.gradle.org', 'downloads.gradle.org', 'repo.spring.io',
   'api.nuget.org', 'globalcdn.nuget.org', 'rubygems.org', 'index.rubygems.org', 'packagist.org', 'repo.packagist.org',
   'pub.dev', 'cdn.cocoapods.org', 'repo.hex.pm', 'builds.hex.pm',
   'github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com',

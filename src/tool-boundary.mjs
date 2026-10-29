@@ -13,6 +13,7 @@ import { proxyEnvironment } from './package-proxy.mjs';
 import { startBoundaryPackageProxy } from './boundary-package-proxy.mjs';
 import { BWRAP, bubblewrapArgs, credentialFiles, referenceFolders } from './linux-sandbox.mjs';
 import { inside, managedSeatbelt } from './seatbelt.mjs';
+import { runSafeGit } from './safe-git.mjs';
 
 export const PI_VERSION = '1.3.0';
 export const TOOL_NAMES = Object.freeze(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']);
@@ -59,8 +60,8 @@ function gitIdentity(git, cwd, userHome) {
 // The trusted runtime resolves the repository before any tool runs.
 function repositoryRoots(git, cwd, temporary) {
   try {
-    const [top, gitDir, commonDir] = execFileSync(git, ['-C', cwd, 'rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
-      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], env: { HOME: temporary, PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1' } }).trim().split('\n');
+    const [top, gitDir, commonDir] = runSafeGit(git, cwd, ['rev-parse', '--show-toplevel', '--absolute-git-dir', '--git-common-dir'],
+      { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], env: { HOME: temporary, PATH: '/usr/bin:/bin' } }).trim().split('\n');
     return { top: fs.realpathSync(top), gitDir: fs.realpathSync(gitDir), commonDir: fs.realpathSync(path.resolve(cwd, commonDir)) };
   } catch { return null; }
 }

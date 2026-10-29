@@ -107,3 +107,24 @@ export function detachedEmulator(command) {
   const list = tokens(String(command ?? ''));
   return !!list && list.length > 0 && list.every(token => token.word !== undefined) && list[0].word.split('/').pop() === 'emulator';
 }
+
+// Programs that run code kept in the project (build phases, Gradle and Pod scripts, hooks, package scripts) or a project file by path.
+const PROJECT_CODE = new Set(['xcodebuild', 'gradlew', 'pod', 'xcodegen', 'flutter', 'npx']);
+// Whether the command runs code the agent could have written, so every mode asks first. A program named by a path is project code
+// unless it is an absolute path outside the project (/usr/bin/xcrun).
+export function runsProjectCode(command, cwd = null) {
+  const list = tokens(String(command ?? ''));
+  if (!list) return true;
+  const inProject = insideProject(cwd);
+  let first = true;
+  for (const { word, op } of list) {
+    if (word === undefined) { if (!['2>&1', '>', '>>', '2>'].includes(op)) first = true; continue; }
+    if (!first) continue;
+    if (ASSIGNMENT.test(word)) continue;
+    first = false;
+    const name = word.split('/').pop();
+    if (PROJECT_CODE.has(name)) return true;
+    if (word.includes('/') && (!word.startsWith('/') || inProject(word))) return true;
+  }
+  return list.some((item, i) => item.word === 'xcrun' && PROJECT_CODE.has(list[i + 1]?.word ?? ''));
+}

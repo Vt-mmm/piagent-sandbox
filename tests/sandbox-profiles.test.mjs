@@ -18,9 +18,9 @@ test('Seatbelt: default deny, writes only in the project and the temporary folde
   assert.match(profile, /\(deny file-read\* file-write\* \(require-all \(subpath "\/h\/\.ssh"\)/);
   assert.match(profile, /\(subpath "\/h\/Library\/Keychains"\)/);
   assert.match(profile, /\\\.env/);
-  assert.match(profile, /\\\.npmrc/);
+  assert.match(profile, /\\\.\(npmrc\|netrc\|pypirc\|git-credentials/);
   assert.match(profile, /auth\\\.json/);
-  assert.match(profile, /\.env\\\.\(example\|sample\|template\|dist\|defaults\)/, 'committed templates stay readable');
+  assert.match(profile, /\.env\[-\._\]\(example\|sample\|template\|dist\|defaults\)\$\|cacert/, 'committed templates stay readable');
   assert.ok(!/network-outbound \(remote ip\)/.test(profile), 'no internet without approval');
   assert.match(profile, /network-outbound \(remote ip "localhost:\*"\)/);
 });

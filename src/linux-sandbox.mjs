@@ -27,8 +27,9 @@ const SCAN_ENTRIES = 50_000;
 // committed templates, credentials and credentials.*, .npmrc, .netrc, and
 // auth.json at a project's root or in a dot folder.
 export function credentialName(name, parent, roots) {
-  if (/^\.env(\.|$)/.test(name)) return !/^\.env\.(example|sample|template|dist|defaults)$/.test(name);
-  if (/^credentials(\.|$)/.test(name) || name === '.npmrc' || name === '.netrc') return true;
+  if (/^\.env([._-]|$)/.test(name)) return !/^\.env[._-](example|sample|template|dist|defaults)$/.test(name);
+  if (/^credentials(\.|$)/.test(name) || ['.npmrc', '.netrc', '.pypirc', '.git-credentials', '.dev.vars'].includes(name)) return true;
+  if (/^secrets?\.(json|ya?ml|toml)$/.test(name) || /^id_(rsa|dsa|ecdsa|ed25519)(\.|$)/.test(name) || /^serviceAccount.*\.json$/.test(name) || (/.\.(pem|key|p12|pfx)$/.test(name) && !name.endsWith('cacert.pem'))) return true;
   return name === 'auth.json' && (roots.includes(parent) || path.basename(parent).startsWith('.'));
 }
 
@@ -51,6 +52,7 @@ export function credentialFiles(roots, { limit = SCAN_ENTRIES } = {}) {
   return found;
 }
 
+export const gitExecFiles = dirs => dirs.flatMap(dir => ['config', 'config.worktree', 'hooks', 'info/attributes'].map(name => path.join(dir, name)));
 const depth = file => file.split('/').length;
 export function bubblewrapArgs({ cwd, sdkRoot, runtimeRoot, temporary, empty, node, readOnly = false, repository = [], gitDirs = [], toolchains = [],
   skills = [], caches = [], references = [], network = false, credentials = [], docker = null, proxySocket = null }) {
@@ -67,6 +69,8 @@ export function bubblewrapArgs({ cwd, sdkRoot, runtimeRoot, temporary, empty, no
     '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--bind', temporary, temporary,
     ...mounts.flatMap(([kind, dir]) => [kind, dir, dir]),
     ...credentials.filter(item => exists(item.path)).flatMap(item => item.directory ? ['--tmpfs', item.path] : ['--ro-bind', empty, item.path]),
+    // Files that make git run a program stay read-only (same rule as the Seatbelt profile). Only those that exist can be mounted over.
+    ...(readOnly ? [] : gitExecFiles([path.join(cwd, '.git'), ...gitDirs]).filter(exists).flatMap(file => ['--ro-bind', file, file])),
     // An approved Docker command reaches the engine's socket (run_with_docker).
     ...(docker && exists(docker) ? ['--bind', docker, docker] : []),
     // A command without network reaches the package proxy (package-proxy.mjs)
