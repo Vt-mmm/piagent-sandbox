@@ -12,7 +12,9 @@ export const darwin = process.platform === 'darwin';
 // A throwaway world: a fake HOME (never the real one) holding synthetic credential files, and a project next to it. Nothing here
 // touches the real ~/.ssh, Keychain, Agent Watch or ~/.pi.
 export function makeWorld() {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'sandbox-test-')));
+  // bubblewrap gives a command a private /tmp, so on Linux the world lives in /var/tmp, where only what is mounted is visible.
+  const base = process.platform === 'linux' && fs.existsSync('/var/tmp') ? '/var/tmp' : os.tmpdir();
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(base, 'sandbox-test-')));
   const home = path.join(root, 'home'), project = path.join(root, 'project'), outside = path.join(root, 'outside');
   const watch = process.platform === 'linux' ? path.join(home, '.local/share/agentwatch') : path.join(home, 'Library/Application Support/AgentWatch');
   const files = {

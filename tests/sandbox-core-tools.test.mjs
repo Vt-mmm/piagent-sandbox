@@ -46,7 +46,7 @@ test('a replaced tool runs in the sandbox: it reads the project and is refused ~
   const run = pi.session.agent.state.tools.find(tool => tool.name === 'read');
   const ok = await run.execute('t1', { path: 'hello.txt' });
   assert.match(ok.content[0].text, /hello from the project/);
-  await assert.rejects(run.execute('t2', { path: world.files.ssh }), /managed-sandbox-denied/);
+  await assert.rejects(run.execute('t2', { path: world.files.ssh }), /managed-sandbox-denied|ENOENT/);
 });
 
 test('grep and find work from inside the sandbox', async () => {

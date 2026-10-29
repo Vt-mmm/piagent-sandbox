@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
-import { attempt, makeWorld, openBoundary } from './helpers/world.mjs';
+import { attempt, darwin, makeWorld, openBoundary } from './helpers/world.mjs';
 
 // The blocklist (acceptance C2): what a command must not reach, and what it still may. A fake HOME holds synthetic secrets; the
 // real home, Keychain and Agent Watch are never touched. Runs on macOS (Seatbelt) and Linux (bubblewrap).
@@ -15,20 +15,24 @@ const bash = command => attempt(tools.call('bash', { command }));
 const read = file => attempt(tools.call('read', { path: file }));
 
 test('~/.ssh, Keychain, .env, .npmrc and Agent Watch files cannot be read by any tool', async () => {
+  // macOS: the read fails. Linux: a credential file inside the project reads as empty, and the member's hidden files are not mounted.
   for (const file of [world.files.ssh, world.files.keychain, world.files.watch, world.files.homeNpmrc, world.files.env, world.files.npmrc]) {
     for (const result of [await read(file), await bash(`cat '${file}'`)]) {
-      assert.equal(result.ok, false, file);
       assert.ok(!result.out.includes(SECRET), `${file} leaked`);
+      if (darwin) assert.equal(result.ok, false, file);
     }
   }
+  for (const file of [world.files.ssh, world.files.keychain, world.files.watch, world.files.homeNpmrc]) assert.equal((await read(file)).ok, false, file);
 });
 
 test('a command cannot write outside the project, and cannot change the project\'s credential files', async () => {
-  for (const result of [await attempt(tools.call('write', { path: path.join(world.outside, 'new.txt'), content: 'x' })),
-    await bash(`echo x > '${path.join(world.outside, 'new.txt')}'`), await bash(`echo x > '${path.join(world.home, 'planted')}'`),
-    await bash(`echo x > '${world.files.env}'`)]) assert.equal(result.ok, false);
-  assert.equal(fs.existsSync(path.join(world.outside, 'new.txt')), false);
+  const outside = path.join(world.outside, 'new.txt'), planted = path.join(world.home, 'planted');
+  for (const result of [await attempt(tools.call('write', { path: outside, content: 'x' })), await bash(`echo x > '${outside}'`), await bash(`echo x > '${planted}'`),
+    await bash(`echo x > '${world.files.env}'`), await bash(`rm -f '${world.files.npmrc}'`)]) assert.equal(result.ok, false);
+  assert.equal(fs.existsSync(outside), false);
+  assert.equal(fs.existsSync(planted), false);
   assert.equal(fs.readFileSync(world.files.env, 'utf8').trim(), SECRET);
+  assert.equal(fs.readFileSync(world.files.npmrc, 'utf8').trim(), SECRET);
 });
 
 test('no outside network: a connection to a public or internal address fails at once, not by timeout', async () => {
