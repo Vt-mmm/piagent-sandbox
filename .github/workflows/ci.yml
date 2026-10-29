@@ -51,7 +51,9 @@ jobs:
           test -e /proc/sys/fs/binfmt_misc/WSLInterop && echo "WSLInterop present" || echo "WSLInterop absent"
       - name: Copy the repository into WSL and test
         shell: wsl-bash {0}
+        env:
+          WSLENV: GITHUB_WORKSPACE/p
         run: |
-          mkdir -p ~/work && cp -R "$(wslpath "$GITHUB_WORKSPACE")/." ~/work/ && cd ~/work
+          mkdir -p ~/work && cp -R "$GITHUB_WORKSPACE/." ~/work/ && cd ~/work
           npm ci
           npm test
