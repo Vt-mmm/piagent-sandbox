@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
+import { timingSafeEqual } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { privateAddress } from './ip-policy.mjs';
 
@@ -13,19 +14,25 @@ export { privateAddress };
 // it checked. With a company upstream proxy (HTTPS_PROXY) the upstream is asked for the checked
 // address, never the name. Everything else gets 403 and is remembered, so the failing command can
 // name the host and run_with_network.
+// Not listed on purpose: hosts that fetch from a server named in the request path, which turn the proxy into a relay for data
+// (proxy.golang.org/<attacker host>/<data>/@v/list, jitpack.io, deno.land/x). A member who needs them adds them to the domains file
+// or runs the command with run_with_network.
 export const DEFAULT_DOMAINS = Object.freeze([
-  'registry.npmjs.org', 'registry.yarnpkg.com', 'repo.yarnpkg.com', 'registry.npmmirror.com', 'jsr.io', 'npm.jsr.io', 'deno.land',
+  'registry.npmjs.org', 'registry.yarnpkg.com', 'repo.yarnpkg.com', 'registry.npmmirror.com', 'jsr.io', 'npm.jsr.io',
   'pypi.org', 'files.pythonhosted.org',
-  'proxy.golang.org', 'sum.golang.org', 'index.golang.org',
+  'sum.golang.org', 'index.golang.org',
   'crates.io', 'index.crates.io', 'static.crates.io', 'static.rust-lang.org',
   'repo.maven.apache.org', 'repo1.maven.org', 'maven.google.com', 'dl.google.com', 'plugins.gradle.org', 'plugins-artifacts.gradle.org',
-  'services.gradle.org', 'downloads.gradle.org', 'repo.spring.io', 'jitpack.io',
+  'services.gradle.org', 'downloads.gradle.org', 'repo.spring.io',
   'api.nuget.org', 'globalcdn.nuget.org', 'rubygems.org', 'index.rubygems.org', 'packagist.org', 'repo.packagist.org',
   'pub.dev', 'cdn.cocoapods.org', 'repo.hex.pm', 'builds.hex.pm',
   'github.com', 'codeload.github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com',
 ]);
 const PORTS = new Set([80, 443]);
+// What one tunnel may send to a registry. Installs send requests, not files: a bulk upload through an allowed host is cut.
+const UPLOAD_LIMIT = 8 * 1024 * 1024;
 const FORBIDDEN = 'HTTP/1.1 403 Forbidden\r\nX-Piagent-Proxy: domain-not-allowed\r\nContent-Length: 0\r\n\r\n';
+const AUTH_REQUIRED = 'HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="piagent"\r\nContent-Length: 0\r\n\r\n';
 const BAD_GATEWAY = 'HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n';
 
 // One host per line (# comments); "*.example.com" covers subdomains. Read by the runtime, not the sandbox.
@@ -57,9 +64,9 @@ function upstreamProxy(env) {
 export class PackageProxy {
   #server; #sockets = new Set();
   // `ports`, `resolve` and `isPrivate` let tests point an allowed name at a local fake registry.
-  constructor({ domains = DEFAULT_DOMAINS, resolve = name => lookup(name, { all: true }), env = process.env, maxDenied = 200, ports = PORTS, isPrivate = privateAddress } = {}) {
+  constructor({ domains = DEFAULT_DOMAINS, resolve = name => lookup(name, { all: true }), env = process.env, maxDenied = 200, ports = PORTS, isPrivate = privateAddress, uploadLimit = UPLOAD_LIMIT, secret = null } = {}) {
     this.domains = [...new Set(domains.map(name => name.toLowerCase()))];
-    Object.assign(this, { resolve, maxDenied, isPrivate, ports: new Set(ports), upstream: upstreamProxy(env), log: [], deniedCount: 0 });
+    Object.assign(this, { resolve, maxDenied, isPrivate, uploadLimit, secret, ports: new Set(ports), upstream: upstreamProxy(env), log: [], deniedCount: 0 });
     this.#server = http.createServer((request, response) => this.#forward(request, response));
     this.#server.on('connect', (request, socket, head) => this.#tunnel(request, socket, head));
     this.#server.on('connection', socket => { this.#sockets.add(socket); socket.once('close', () => this.#sockets.delete(socket)); });
@@ -91,8 +98,17 @@ export class PackageProxy {
       return { host: addresses[0].address, port };
     } catch { this.#deny(host); return null; }
   }
+  // With a secret, only a client that knows it (Proxy-Authorization: Basic) may use the proxy: another process or user on this machine
+  // that finds the port is refused.
+  #authorized(request) {
+    if (!this.secret) return true;
+    const header = String(request.headers['proxy-authorization'] ?? '');
+    const given = Buffer.from(header.replace(/^Basic\s+/i, ''), 'base64').toString('utf8').split(':').slice(1).join(':');
+    return given.length === this.secret.length && timingSafeEqual(Buffer.from(given), Buffer.from(this.secret));
+  }
   async #tunnel(request, socket, head) {
     socket.on('error', () => {});
+    if (!this.#authorized(request)) { socket.end(AUTH_REQUIRED); return; }
     const match = /^([^:[\]]+|\[[^\]]+\]):(\d+)$/.exec(request.url ?? '');
     const target = match ? await this.#target(match[1], Number(match[2])) : (this.#deny(request.url ?? ''), null);
     if (!target) { socket.end(FORBIDDEN); return; }
@@ -102,10 +118,16 @@ export class PackageProxy {
     upstream.on('error', () => { if (socket.writable) socket.end(BAD_GATEWAY); });
     socket.on('close', () => upstream.destroy());
   }
+  #pipe(upstream, socket) {
+    let sent = 0;
+    upstream.pipe(socket);
+    socket.on('data', chunk => { sent += chunk.length; if (sent > this.uploadLimit) { socket.destroy(); upstream.destroy(); } });
+    socket.pipe(upstream);
+  }
   #join(upstream, socket, head) {
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     if (head?.length) upstream.write(head);
-    upstream.pipe(socket); socket.pipe(upstream);
+    this.#pipe(upstream, socket);
   }
   #viaUpstream(upstream, socket, head, target) {
     upstream.write(`CONNECT ${authority(target)} HTTP/1.1\r\nHost: ${authority(target)}\r\n\r\n`);
@@ -119,11 +141,12 @@ export class PackageProxy {
       socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (reply.length > end + 4) socket.write(reply.subarray(end + 4));
       if (head?.length) upstream.write(head);
-      upstream.pipe(socket); socket.pipe(upstream);
+      this.#pipe(upstream, socket);
     };
     upstream.on('data', onData);
   }
   async #forward(request, response) {
+    if (!this.#authorized(request)) { response.writeHead(407, { 'Proxy-Authenticate': 'Basic realm="piagent"', 'Content-Length': '0' }).end(); return; }
     let url;
     try { url = new URL(request.url); } catch { response.writeHead(400).end(); return; }
     if (url.protocol !== 'http:') { response.writeHead(400).end(); return; }
@@ -151,16 +174,18 @@ export class PackageProxy {
 
 // Maven reads its proxy only from settings.xml, in the sandbox's own home.
 export function mavenSettings(url) {
-  const { hostname, port } = new URL(url);
+  const { hostname, port, username, password } = new URL(url);
+  const login = username ? `<username>${username}</username><password>${decodeURIComponent(password)}</password>` : '';
   const proxy = protocol => `<proxy><id>piagent-${protocol}</id><active>true</active><protocol>${protocol}</protocol>`
-    + `<host>${hostname}</host><port>${port}</port><nonProxyHosts>localhost|127.0.0.1</nonProxyHosts></proxy>`;
+    + `<host>${hostname}</host><port>${port}</port>${login}<nonProxyHosts>localhost|127.0.0.1</nonProxyHosts></proxy>`;
   return `<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"><proxies>${proxy('https')}${proxy('http')}</proxies></settings>\n`;
 }
 
 // Variables package managers read, plus the JVM's (Gradle ignores the variables).
 export function proxyEnvironment(url, { mavenOpts = '', gradleOpts = '', mavenHome = null } = {}) {
-  const { hostname, port } = new URL(url);
-  const jvm = `-Dhttp.proxyHost=${hostname} -Dhttp.proxyPort=${port} -Dhttps.proxyHost=${hostname} -Dhttps.proxyPort=${port} -Dhttp.nonProxyHosts=localhost|127.0.0.1|::1`;
+  const { hostname, port, username, password } = new URL(url);
+  const login = username ? ` -Dhttp.proxyUser=${username} -Dhttp.proxyPassword=${decodeURIComponent(password)} -Dhttps.proxyUser=${username} -Dhttps.proxyPassword=${decodeURIComponent(password)}` : '';
+  const jvm = `-Dhttp.proxyHost=${hostname} -Dhttp.proxyPort=${port} -Dhttps.proxyHost=${hostname} -Dhttps.proxyPort=${port}${login} -Dhttp.nonProxyHosts=localhost|127.0.0.1|::1`;
   return {
     HTTP_PROXY: url, HTTPS_PROXY: url, http_proxy: url, https_proxy: url, NO_PROXY: 'localhost,127.0.0.1,::1', no_proxy: 'localhost,127.0.0.1,::1',
     npm_config_proxy: url, npm_config_https_proxy: url,

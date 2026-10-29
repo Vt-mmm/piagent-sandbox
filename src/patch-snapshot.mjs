@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { listProjectFiles, MAX_FILE_BYTES } from './checkpoint-git.mjs';
+import { runSafeGit } from './safe-git.mjs';
 
 // The patch a reviewer would see (diff against HEAD or a base commit, plus new files) as a digest, so a review knows whether it
 // is still current, and the map of changed files, so a conversation answers for its own changes. Read-only git; no index writes.
@@ -11,8 +11,8 @@ const REF = /^[A-Za-z0-9._/~^@{}-]{1,200}$/;
 const MAX_PATCH = 16 * 1024 * 1024;
 
 function git(cwd, args, bin = 'git') {
-  return execFileSync(bin, ['-C', cwd, ...args], { encoding: 'utf8', maxBuffer: MAX_PATCH + 1, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', HOME: '/nonexistent', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } });
+  return runSafeGit(bin, cwd, args, { encoding: 'utf8', maxBuffer: MAX_PATCH + 1, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', HOME: '/nonexistent' } });
 }
 
 // The commit HEAD names now, or null (no repository, no commit yet).

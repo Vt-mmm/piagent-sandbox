@@ -37,27 +37,27 @@ test('a declined command does not run, and the same command is not asked about a
   assert.equal(s.invoked.length, 0);
 });
 
-test('Full access runs network, Docker and simulator commands, but asks about the handoff and the destructive', async () => {
+test('Full access runs simulator commands that run no project code, but asks about network, Docker, the handoff and the destructive', async () => {
   const s = setup('full');
   const ctx = fakeCtx();
-  await s.run('run_with_network', 'npm install playwright', ctx);
-  await s.run('run_with_docker', 'docker compose up -d', ctx);
   await s.run('run_on_simulator', 'xcrun simctl boot booted', ctx);
   assert.equal(ctx.asked.length, 0);
+  await s.run('run_with_network', 'npm install playwright', ctx);
+  await s.run('run_with_docker', 'docker compose up -d', ctx);
   await s.run('run_with_network', 'git push origin main', ctx);
   await s.run('run_with_network', 'docker compose down -v', ctx);
-  assert.equal(ctx.asked.length, 2);
-  assert.match(ctx.asked[0].body, /Full access vẫn hỏi: git push sends to a remote/);
+  assert.equal(ctx.asked.length, 4);
+  assert.match(ctx.asked[0].body, /Full access vẫn hỏi: with the internet a command can send the project out/);
 });
 
-test('Bypass runs the work and asks about the handoff: push, PR, publish, deploy', async () => {
+test('Bypass runs simulator commands and asks about everything that leaves the sandbox with the internet or Docker', async () => {
   const s = setup('bypass');
   const ctx = fakeCtx();
-  await s.run('run_with_network', 'docker compose down -v', ctx);
+  await s.run('run_on_simulator', 'adb devices', ctx);
+  assert.equal(ctx.asked.length, 0);
+  for (const command of ['docker compose down -v', 'git push', 'gh pr create --fill', 'npm publish', 'npx vercel deploy --prod', 'docker push org/app']) await s.run('run_with_network', command, ctx);
   await s.run('run_with_docker', 'docker build .', ctx);
-  assert.equal(ctx.asked.length, 0, 'destructive but local: Bypass runs it');
-  for (const command of ['git push', 'gh pr create --fill', 'npm publish', 'npx vercel deploy --prod', 'docker push org/app']) await s.run('run_with_network', command, ctx);
-  assert.equal(ctx.asked.length, 5);
+  assert.equal(ctx.asked.length, 7);
   assert.match(ctx.asked[0].body, /Bypass vẫn hỏi/);
 });
 

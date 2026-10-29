@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { SAFE_GIT_ARGS, safeGitEnv } from './safe-git.mjs';
 
 // fetch_origin: one approved `git fetch` of the GitHub origin. The credential never enters the sandbox: the runtime downloads the
 // branches into a staging bare repository, then the sandbox imports them from that local copy. Working files and the current branch
@@ -15,8 +16,10 @@ export const FETCH_FAILED = 'managed-repository-fetch-failed: fetch_origin khôn
 
 export async function fetchPlan(cwd, sub = '', { git = 'git' } = {}) {
   const target = path.resolve(cwd, sub || '.');
-  if (path.relative(cwd, target).startsWith('..')) throw new Error('managed-path-invalid');
-  const url = (await run(git, ['-C', target, 'remote', 'get-url', 'origin'], { env: { PATH: '/usr/bin:/bin:/opt/homebrew/bin', HOME: os.tmpdir() } })).trim();
+  const inside = (file, root) => { const rel = path.relative(root, file); return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)); };
+  if (!inside(target, cwd)) throw new Error('managed-path-invalid');
+  try { if (!inside(fs.realpathSync(target), fs.realpathSync(cwd))) throw new Error('managed-path-invalid'); } catch (error) { if (error.message === 'managed-path-invalid') throw error; }
+  const url = (await run(git, ['-C', target, ...SAFE_GIT_ARGS, 'remote', 'get-url', 'origin'], { env: safeGitEnv({ PATH: '/usr/bin:/bin:/opt/homebrew/bin', HOME: os.tmpdir() }) })).trim();
   const repository = GITHUB.exec(url)?.[1];
   if (!repository) throw new Error('managed-repository-unsupported: origin phải là một repository trên github.com');
   return { cwd: target, url: `https://github.com/${repository}.git`, repository };

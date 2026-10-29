@@ -64,6 +64,15 @@ export function commandSegments(command, depth = 0) {
     const run = stripWrapper(w);
     const at = run.findIndex(item => /^-[a-z]*c$/.test(item));
     if (SHELLS.has(run[0]?.split('/').pop()) && at > 0 && run[at + 1]) nested.push(run[at + 1]);
+    // `eval "git push"` and `find . -exec git push \;` run their words as a command.
+    if (run[0] === 'eval' && run.length > 1) nested.push(run.slice(1).join(' '));
+    if (run[0]?.split('/').pop() === 'find') {
+      for (let i = 1; i < run.length; i += 1) {
+        if (!/^-(exec|execdir|ok|okdir)$/.test(run[i])) continue;
+        const end = run.findIndex((item, j) => j > i && (item === ';' || item === '+'));
+        nested.push(run.slice(i + 1, end < 0 ? run.length : end).filter(item => item !== '{}').join(' '));
+      }
+    }
   }
   if (depth < 4) for (const inner of nested) segments.push(...commandSegments(inner, depth + 1));
   return segments;

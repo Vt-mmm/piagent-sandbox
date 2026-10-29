@@ -27,8 +27,9 @@ const SCAN_ENTRIES = 50_000;
 // committed templates, credentials and credentials.*, .npmrc, .netrc, and
 // auth.json at a project's root or in a dot folder.
 export function credentialName(name, parent, roots) {
-  if (/^\.env(\.|$)/.test(name)) return !/^\.env\.(example|sample|template|dist|defaults)$/.test(name);
-  if (/^credentials(\.|$)/.test(name) || name === '.npmrc' || name === '.netrc') return true;
+  if (/^\.env([._-]|$)/.test(name)) return !/^\.env[._-](example|sample|template|dist|defaults)$/.test(name);
+  if (/^credentials(\.|$)/.test(name) || ['.npmrc', '.netrc', '.pypirc', '.git-credentials', '.dev.vars'].includes(name)) return true;
+  if (/^secrets?\.(json|ya?ml|toml)$/.test(name) || /^id_(rsa|dsa|ecdsa|ed25519)(\.|$)/.test(name) || /^serviceAccount.*\.json$/.test(name) || (/.\.(pem|key|p12|pfx)$/.test(name) && !name.endsWith('cacert.pem'))) return true;
   return name === 'auth.json' && (roots.includes(parent) || path.basename(parent).startsWith('.'));
 }
 
@@ -51,6 +52,7 @@ export function credentialFiles(roots, { limit = SCAN_ENTRIES } = {}) {
   return found;
 }
 
+export const gitExecFiles = dirs => dirs.flatMap(dir => ['config', 'config.worktree', 'hooks', 'info/attributes'].map(name => path.join(dir, name)));
 const depth = file => file.split('/').length;
 export function bubblewrapArgs({ cwd, sdkRoot, runtimeRoot, temporary, empty, node, readOnly = false, repository = [], gitDirs = [], toolchains = [],
   skills = [], caches = [], references = [], network = false, credentials = [], docker = null, proxySocket = null }) {
@@ -61,12 +63,14 @@ export function bubblewrapArgs({ cwd, sdkRoot, runtimeRoot, temporary, empty, no
   const mounts = [...readable.map(dir => ['--ro-bind', dir]), ...writable.map(dir => ['--bind', dir])]
     .sort((a, b) => depth(a[1]) - depth(b[1]) || (a[0] === '--ro-bind' ? -1 : 1));
   return [
-    '--die-with-parent', '--new-session', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
+    '--die-with-parent', '--new-session', '--cap-drop', 'ALL', '--unshare-user-try', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try',
     ...(network ? [] : ['--unshare-net']),
     ...SYSTEM.filter(exists).flatMap(dir => ['--ro-bind', dir, dir]),
     '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--bind', temporary, temporary,
     ...mounts.flatMap(([kind, dir]) => [kind, dir, dir]),
     ...credentials.filter(item => exists(item.path)).flatMap(item => item.directory ? ['--tmpfs', item.path] : ['--ro-bind', empty, item.path]),
+    // Files that make git run a program stay read-only (same rule as the Seatbelt profile). Only those that exist can be mounted over.
+    ...(readOnly ? [] : gitExecFiles([path.join(cwd, '.git'), ...gitDirs]).filter(exists).flatMap(file => ['--ro-bind', file, file])),
     // An approved Docker command reaches the engine's socket (run_with_docker).
     ...(docker && exists(docker) ? ['--bind', docker, docker] : []),
     // A command without network reaches the package proxy (package-proxy.mjs)
@@ -76,12 +80,16 @@ export function bubblewrapArgs({ cwd, sdkRoot, runtimeRoot, temporary, empty, no
   ];
 }
 
-// The member's own folders for reference: the home folder's entries except
-// hidden ones (and the Windows profile's, from WSL, except AppData).
-export function referenceFolders(userHome, windowsHome = null) {
-  const list = (home, skip = () => false) => {
-    try { return fs.readdirSync(home, { withFileTypes: true }).filter(entry => !entry.name.startsWith('.') && !skip(entry.name)).map(entry => path.join(home, entry.name)); }
-    catch { return []; }
-  };
-  return [...list(userHome), ...(windowsHome ? list(windowsHome, name => /^(AppData|NTUSER|ntuser)/i.test(name)) : [])];
+// The folders the member chose for reference: one absolute path per line in `file` (# comments), real directories only, at most 50.
+// Same file on macOS and Linux. The home folder as a whole is never offered.
+export function memberReferences(file) {
+  let text = '';
+  try { if (file) text = fs.readFileSync(file, 'utf8'); } catch { return []; }
+  const out = [];
+  for (const line of text.split('\n')) {
+    const entry = line.replace(/#.*/, '').trim();
+    if (!entry || !path.isAbsolute(entry) || /[\x00-\x1f\x7f"\\]/.test(entry)) continue;
+    try { const real = fs.realpathSync(entry); if (fs.statSync(real).isDirectory() && real !== '/') out.push(real); } catch { /* absent */ }
+  }
+  return [...new Set(out)].slice(0, 50);
 }

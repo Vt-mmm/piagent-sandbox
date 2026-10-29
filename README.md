@@ -24,8 +24,8 @@ Without approval, commands reach the package registries only (npm, PyPI, Go, cra
 
 | | Ask first | Full access | Bypass |
 |---|---|---|---|
-| `run_with_network`, `run_with_docker`, `run_on_simulator` | ask | run, except handoff and destructive steps | run, except handoff |
-| `run_on_host` | ask | ask | ask |
+| `run_with_network`, `run_with_docker`, `run_on_host` | ask | ask | ask |
+| `run_on_simulator` | ask | run `simctl`/`adb`/`emulator`; ask when the command runs project code (`xcodebuild`, `gradlew`, `pod`, `flutter`, `npx`, `./tool`) | same as Full access |
 | `start_docker`, `fetch_origin` | ask | run | run |
 | push, PR, publish, deploy, remote and cloud tools, uploads | ask | ask | ask |
 
@@ -55,3 +55,13 @@ npm test
 ## Security
 
 See [SECURITY.md](SECURITY.md). Report vulnerabilities privately.
+
+### Limits of the checks
+
+The handoff reader (`handoff-policy.mjs`) and the simulator command reader are text checks that help the card say why; they are not the boundary and a determined command can spell around them. That is why network, Docker and host commands ask every time. Git files that make git run a program (`.git/config`, `.git/hooks`, `.git/info/attributes`, `.gitmodules`, `.gitattributes`) are read-only for the sandbox, and git on the host runs with `src/safe-git.mjs` (no fsmonitor, hooks, textconv or external diff).
+
+### Reading the web, reference folders, loopback
+
+- `web_fetch` is a tool of this package: https GET, name resolved by the runtime, private/local/IP-literal addresses refused, the connection pinned to the checked address, redirects only within the same host, no cookies or credentials, text only, 2 MB. The fetch guard still asks about unfamiliar hosts first.
+- Reference folders (read-only) are the ones listed in `sandbox-references` in the agent dir (or `PIAGENT_SANDBOX_REFERENCES`), one absolute path per line. The home folder as a whole is closed.
+- A plain command reaches no loopback service, not even a server it starts itself (macOS; on Linux it has a private network namespace). Use `run_with_network` for end-to-end tests. Package proxy: per-run secret on its loopback port, upload cap per tunnel, Unix socket in a private folder on Linux.

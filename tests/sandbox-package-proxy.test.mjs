@@ -70,7 +70,7 @@ describe('the proxy itself', () => {
   });
 
   test('registry list, member domains file and proxy environment', () => {
-    for (const host of ['registry.npmjs.org', 'pypi.org', 'files.pythonhosted.org', 'proxy.golang.org', 'crates.io', 'repo.maven.apache.org', 'api.nuget.org',
+    for (const host of ['registry.npmjs.org', 'pypi.org', 'files.pythonhosted.org', 'sum.golang.org', 'crates.io', 'repo.maven.apache.org', 'api.nuget.org',
       'rubygems.org', 'packagist.org', 'pub.dev'])
       assert.ok(DEFAULT_DOMAINS.includes(host), host);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'domains-'));
@@ -168,4 +168,8 @@ describe('through the sandbox', () => {
     assert.equal(result.ok, false);
     assert.match(result.out, /managed-domain-blocked/);
   });
+});
+
+test('T4: hosts that fetch from a server named in the request path are not on the default list', () => {
+  for (const host of ['proxy.golang.org', 'jitpack.io', 'deno.land']) assert.equal(DEFAULT_DOMAINS.includes(host), false, host);
 });
